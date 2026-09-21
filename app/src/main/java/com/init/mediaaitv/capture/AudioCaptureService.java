@@ -42,6 +42,8 @@ public final class AudioCaptureService extends Service {
     private final AtomicBoolean requestInFlight = new AtomicBoolean(false);
     private AudioManager audioManager;
     private AudioFocusRequest focusRequest;
+    private int originalMusicVolume = -1;
+    private boolean sourceMuted = false;
 
     @Override public void onCreate() {
         super.onCreate();
@@ -148,6 +150,10 @@ public final class AudioCaptureService extends Service {
                             return;
                         }
 
+                        if ("translated-openvoice".equals(client.getLastMode())) {
+                            enableSourceReplacement();
+                        }
+
                         if ("pcm-loopback".equals(client.getLastMode())) {
                             notice("Modo prueba: el servidor devuelve el audio original, sin traducir.");
                         } else if ("buffering".equals(client.getLastMode())) {
@@ -185,6 +191,31 @@ public final class AudioCaptureService extends Service {
         updateNotification(text);
     }
 
+    private void enableSourceReplacement() {
+        if (sourceMuted) return;
+        if (audioManager == null) audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+        try {
+            originalMusicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0);
+            sourceMuted = true;
+            notice("Audio original silenciado; reproduciendo solo doblaje IA.");
+        } catch (Throwable t) {
+            Log.w(TAG, "Could not mute original media stream", t);
+        }
+    }
+
+    private void restoreSourceAudio() {
+        if (!sourceMuted || audioManager == null || originalMusicVolume < 0) return;
+        try {
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, originalMusicVolume, 0);
+        } catch (Throwable t) {
+            Log.w(TAG, "Could not restore original media volume", t);
+        } finally {
+            sourceMuted = false;
+            originalMusicVolume = -1;
+        }
+    }
+
     private void requestDuck() {
         if (audioManager == null) audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
         if (Build.VERSION.SDK_INT >= 26) {
@@ -213,6 +244,7 @@ public final class AudioCaptureService extends Service {
         projection = null;
         if (executor != null) executor.shutdownNow();
         executor = null;
+        restoreSourceAudio();
         if (audioManager != null && focusRequest != null && Build.VERSION.SDK_INT >= 26) {
             audioManager.abandonAudioFocusRequest(focusRequest);
         }
