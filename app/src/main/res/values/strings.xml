@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">INIT Media AI TV</string>
+    <string name="accessibility_desc">Optional remote shortcut: press the captions or red programmable key to toggle INIT translation while another app is open.</string>
+</resources>
