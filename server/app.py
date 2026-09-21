@@ -265,10 +265,17 @@ def get_session(sid: str, language: str, voice_mode: str) -> Session:
             sess = Session(sid, language, voice_mode)
             _sessions[sid] = sess
         else:
-            sess.language = language
+            if language:
+                sess.language = language
             if voice_mode in ("fast", "clone"):
                 sess.voice_mode = voice_mode
         return sess
+
+
+def find_session(sid: str):
+    sid = safe_id(sid)
+    with _sessions_lock:
+        return _sessions.get(sid)
 
 
 @app.get("/health")
@@ -317,7 +324,9 @@ async def stream_push(request: Request):
 
 @app.get("/v1/stream/poll-text")
 def stream_poll_text(session: str):
-    sess = get_session(session, "es-ES", "fast")
+    sess = find_session(session)
+    if sess is None:
+        return {"ok": False, "mode": "waiting", "text": "", "queued_seconds": 0}
     item = sess.pop()
     if item is None:
         return {
@@ -341,7 +350,9 @@ def stream_poll_text(session: str):
 
 @app.get("/v1/stream/poll")
 def stream_poll(session: str):
-    sess = get_session(session, "es-ES", "clone")
+    sess = find_session(session)
+    if sess is None:
+        return Response(content=b"", media_type="audio/L16", headers={"X-Init-Mode": "waiting"})
     item = sess.pop()
     if item is None:
         return Response(
