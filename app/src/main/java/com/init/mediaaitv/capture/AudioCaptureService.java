@@ -23,13 +23,16 @@ import android.util.Log;
 import com.init.mediaaitv.MainActivity;
 
 import java.util.Arrays;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 public final class AudioCaptureService extends Service {
     public static final String ACTION_STOP = "com.init.mediaaitv.STOP";
     public static volatile boolean running = false;
+
     private static final String TAG = "InitCapture";
     private static final String CHANNEL = "init_translate";
 
@@ -37,27 +40,33 @@ public final class AudioCaptureService extends Service {
     private AudioRecord recorder;
     private PcmPlayer player;
     private ExecutorService executor;
+    private final BlockingQueue<byte[]> uploadQueue = new LinkedBlockingQueue<>();
+
     private volatile boolean stop;
+    private volatile boolean shuttingDown;
     private volatile String lastNotice = "";
-    private final AtomicBoolean requestInFlight = new AtomicBoolean(false);
+
     private AudioManager audioManager;
     private AudioFocusRequest focusRequest;
     private int originalMusicVolume = -1;
     private boolean sourceMuted = false;
+    private TranslationClient client;
 
     @Override public void onCreate() {
         super.onCreate();
         createChannel();
-        startForeground(41, notification("Preparing translation..."));
+        startForeground(41, notification("Preparing continuous translation..."));
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
+
         if (ACTION_STOP.equals(intent.getAction())) {
             shutdown();
             stopSelf();
             return START_NOT_STICKY;
         }
+
         if (running) return START_STICKY;
 
         int resultCode = intent.getIntExtra("resultCode", Activity.RESULT_CANCELED);
@@ -66,13 +75,15 @@ public final class AudioCaptureService extends Service {
         String quality = intent.getStringExtra("quality");
         String spatial = intent.getStringExtra("spatial");
         String server = intent.getStringExtra("server");
+
         if (resultCode != Activity.RESULT_OK || resultData == null) {
             stopSelf();
             return START_NOT_STICKY;
         }
 
         try {
-            MediaProjectionManager pm = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+            MediaProjectionManager pm =
+                    (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
             projection = pm.getMediaProjection(resultCode, resultData);
             projection.registerCallback(new MediaProjection.Callback() {
                 @Override public void onStop() {
@@ -81,11 +92,12 @@ public final class AudioCaptureService extends Service {
                 }
             }, new android.os.Handler(getMainLooper()));
 
-            AudioPlaybackCaptureConfiguration config = new AudioPlaybackCaptureConfiguration.Builder(projection)
-                    .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                    .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                    .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                    .build();
+            AudioPlaybackCaptureConfiguration config =
+                    new AudioPlaybackCaptureConfiguration.Builder(projection)
+                            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                            .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                            .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                            .build();
 
             AudioFormat format = new AudioFormat.Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -93,96 +105,139 @@ public final class AudioCaptureService extends Service {
                     .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
                     .build();
 
-            int min = AudioRecord.getMinBufferSize(48000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            int min = AudioRecord.getMinBufferSize(
+                    48000,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+            );
+
             recorder = new AudioRecord.Builder()
                     .setAudioFormat(format)
-                    .setBufferSizeInBytes(Math.max(min * 4, 96000))
+                    .setBufferSizeInBytes(Math.max(min * 4, 192000))
                     .setAudioPlaybackCaptureConfig(config)
                     .build();
 
             player = new PcmPlayer();
-            TranslationClient client = new TranslationClient(
+            client = new TranslationClient(
                     server,
                     lang == null ? "es-ES" : lang,
                     quality == null ? "Auto AI" : quality,
                     spatial == null ? "Spatial AI automatic" : spatial
             );
 
-            executor = Executors.newFixedThreadPool(2);
+            executor = Executors.newFixedThreadPool(3);
             stop = false;
+            shuttingDown = false;
             running = true;
-            updateNotification("Translation ON - " + (lang == null ? "es-ES" : lang));
+
+            updateNotification("Traduccion continua ON - " + (lang == null ? "es-ES" : lang));
             recorder.startRecording();
-            executor.execute(() -> captureLoop(client));
+
+            executor.execute(this::captureLoop);
+            executor.execute(this::uploadLoop);
+            executor.execute(this::pollLoop);
+
         } catch (Throwable t) {
             Log.e(TAG, "Cannot start playback capture", t);
             shutdown();
             stopSelf();
         }
+
         return START_STICKY;
     }
 
-    private void captureLoop(TranslationClient client) {
+    private void captureLoop() {
+        // 1 second of mono PCM16 at 48 kHz.
         byte[] buf = new byte[96000];
         int pos = 0;
+
         while (!stop && recorder != null) {
-            int n = recorder.read(buf, pos, buf.length - pos, AudioRecord.READ_BLOCKING);
+            int n = recorder.read(
+                    buf,
+                    pos,
+                    buf.length - pos,
+                    AudioRecord.READ_BLOCKING
+            );
+
             if (n <= 0) continue;
+
             pos += n;
             if (pos >= buf.length) {
-                byte[] chunk = Arrays.copyOf(buf, pos);
+                uploadQueue.offer(Arrays.copyOf(buf, pos));
                 pos = 0;
-                if (!requestInFlight.compareAndSet(false, true)) {
-                    notice("Procesando traduccion; descartando audio atrasado para evitar cola.");
-                    continue;
+
+                int pending = uploadQueue.size();
+                if (pending > 5) {
+                    notice("Subiendo audio continuo. Cola local: " + pending + " s");
                 }
-
-                executor.execute(() -> {
-                    try {
-                        if (!hasSignal(chunk)) {
-                            notice("Sin audio capturable. La app fuente puede bloquear la captura.");
-                            return;
-                        }
-
-                        byte[] translated = client.translatePcm(chunk);
-                        if (!client.getLastError().isEmpty()) {
-                            notice("Backend IA: " + client.getLastError());
-                            return;
-                        }
-
-                        if ("translated-openvoice".equals(client.getLastMode())) {
-                            enableSourceReplacement();
-                        }
-
-                        if ("pcm-loopback".equals(client.getLastMode())) {
-                            notice("Modo prueba: el servidor devuelve el audio original, sin traducir.");
-                        } else if ("buffering".equals(client.getLastMode())) {
-                            notice("Acumulando voz para traducir...");
-                        } else if (translated.length > 0) {
-                            notice("Traduccion IA activa - " + client.getLastMode());
-                        }
-
-                        if (translated.length > 0 && !stop) {
-                            requestDuck();
-                            if (player != null) player.write(translated);
-                        }
-                    } finally {
-                        requestInFlight.set(false);
-                    }
-                });
             }
         }
     }
 
-    private boolean hasSignal(byte[] pcm) {
-        int peak = 0;
-        for (int i = 0; i + 1 < pcm.length; i += 2) {
-            int sample = (short)((pcm[i] & 0xff) | (pcm[i + 1] << 8));
-            int a = Math.abs(sample);
-            if (a > peak) peak = a;
-            if (peak > 300) return true;
+    private void uploadLoop() {
+        while (!stop) {
+            try {
+                byte[] chunk = uploadQueue.poll(500, TimeUnit.MILLISECONDS);
+                if (chunk == null) continue;
+
+                boolean ok = client != null && client.pushPcm(chunk);
+                if (!ok && client != null && !client.getLastError().isEmpty()) {
+                    notice("Servidor IA: " + client.getLastError());
+                    // Do not drop this movie segment because of a temporary network failure.
+                    uploadQueue.offer(chunk);
+                    Thread.sleep(1000);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Throwable t) {
+                Log.w(TAG, "Upload loop error", t);
+            }
         }
-        return false;
+    }
+
+    private void pollLoop() {
+        while (!stop) {
+            try {
+                if (client == null) {
+                    Thread.sleep(250);
+                    continue;
+                }
+
+                byte[] translated = client.pollPcm();
+
+                if (!client.getLastError().isEmpty()) {
+                    notice("Backend IA: " + client.getLastError());
+                }
+
+                if ("translated-openvoice".equals(client.getLastMode())) {
+                    enableSourceReplacement();
+                }
+
+                if (translated.length > 0 && !stop) {
+                    notice(
+                            "Doblando pelicula completa. Retraso servidor: "
+                                    + client.getLastQueuedSeconds() + " s"
+                    );
+                    requestDuck();
+                    if (player != null) player.write(translated);
+                } else {
+                    Thread.sleep(250);
+                }
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Throwable t) {
+                Log.w(TAG, "Poll loop error", t);
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
     }
 
     private void notice(String text) {
@@ -193,12 +248,16 @@ public final class AudioCaptureService extends Service {
 
     private void enableSourceReplacement() {
         if (sourceMuted) return;
-        if (audioManager == null) audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+
+        if (audioManager == null) {
+            audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+        }
+
         try {
             originalMusicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0);
             sourceMuted = true;
-            notice("Audio original silenciado; reproduciendo solo doblaje IA.");
+            notice("Audio original silenciado; doblaje IA activo.");
         } catch (Throwable t) {
             Log.w(TAG, "Could not mute original media stream", t);
         }
@@ -206,8 +265,13 @@ public final class AudioCaptureService extends Service {
 
     private void restoreSourceAudio() {
         if (!sourceMuted || audioManager == null || originalMusicVolume < 0) return;
+
         try {
-            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, originalMusicVolume, 0);
+            audioManager.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    originalMusicVolume,
+                    0
+            );
         } catch (Throwable t) {
             Log.w(TAG, "Could not restore original media volume", t);
         } finally {
@@ -217,34 +281,65 @@ public final class AudioCaptureService extends Service {
     }
 
     private void requestDuck() {
-        if (audioManager == null) audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (audioManager == null) {
+            audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+        }
+
         if (Build.VERSION.SDK_INT >= 26) {
             if (focusRequest == null) {
-                focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-                        .setAudioAttributes(new AudioAttributes.Builder()
-                                .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                                .build())
-                        .setAcceptsDelayedFocusGain(false)
-                        .build();
+                focusRequest =
+                        new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                                .setAudioAttributes(
+                                        new AudioAttributes.Builder()
+                                                .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                                .build()
+                                )
+                                .setAcceptsDelayedFocusGain(false)
+                                .build();
             }
             audioManager.requestAudioFocus(focusRequest);
         }
     }
 
-    private void shutdown() {
+    private synchronized void shutdown() {
+        if (shuttingDown) return;
+        shuttingDown = true;
+
         stop = true;
         running = false;
-        try { if (recorder != null) recorder.stop(); } catch (Exception ignored) {}
+
+        try {
+            if (client != null) client.stopSession();
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            if (recorder != null) recorder.stop();
+        } catch (Throwable ignored) {
+        }
+
         if (recorder != null) recorder.release();
         recorder = null;
+
         if (player != null) player.close();
         player = null;
-        if (projection != null) projection.stop();
+
+        MediaProjection p = projection;
         projection = null;
+        if (p != null) {
+            try {
+                p.stop();
+            } catch (Throwable ignored) {
+            }
+        }
+
         if (executor != null) executor.shutdownNow();
         executor = null;
+
+        uploadQueue.clear();
         restoreSourceAudio();
+
         if (audioManager != null && focusRequest != null && Build.VERSION.SDK_INT >= 26) {
             audioManager.abandonAudioFocusRequest(focusRequest);
         }
@@ -252,12 +347,24 @@ public final class AudioCaptureService extends Service {
 
     private void createChannel() {
         NotificationManager nm = getSystemService(NotificationManager.class);
-        nm.createNotificationChannel(new NotificationChannel(CHANNEL, "INIT live translation", NotificationManager.IMPORTANCE_LOW));
+        nm.createNotificationChannel(
+                new NotificationChannel(
+                        CHANNEL,
+                        "INIT live translation",
+                        NotificationManager.IMPORTANCE_LOW
+                )
+        );
     }
 
     private Notification notification(String text) {
         Intent i = new Intent(this, MainActivity.class);
-        PendingIntent p = PendingIntent.getActivity(this, 0, i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        PendingIntent p = PendingIntent.getActivity(
+                this,
+                0,
+                i,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
+        );
+
         return new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                 .setContentTitle("INIT Media AI TV")
@@ -268,7 +375,8 @@ public final class AudioCaptureService extends Service {
     }
 
     private void updateNotification(String text) {
-        getSystemService(NotificationManager.class).notify(41, notification(text));
+        getSystemService(NotificationManager.class)
+                .notify(41, notification(text));
     }
 
     @Override public void onDestroy() {
