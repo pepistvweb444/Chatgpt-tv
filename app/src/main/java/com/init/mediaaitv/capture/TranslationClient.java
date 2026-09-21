@@ -185,6 +185,47 @@ public final class TranslationClient {
         }
     }
 
+
+    public byte[] synthesizeText(String text) {
+        if (baseUrl.isEmpty() || text == null || text.trim().isEmpty()) return new byte[0];
+        HttpURLConnection c = null;
+        try {
+            String q = "?lang=" + URLEncoder.encode(language, "UTF-8");
+            URL url = new URL(baseUrl + "/v1/synthesize-text" + q);
+            c = (HttpURLConnection) url.openConnection();
+            c.setConnectTimeout(3000);
+            c.setReadTimeout(180000);
+            c.setRequestMethod("POST");
+            c.setDoOutput(true);
+            c.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+            c.setRequestProperty("X-Init-Session", sessionId);
+            byte[] body = text.getBytes(StandardCharsets.UTF_8);
+            c.setFixedLengthStreamingMode(body.length);
+            try (OutputStream out = c.getOutputStream()) {
+                out.write(body);
+            }
+            int code = c.getResponseCode();
+            if (code != 200) {
+                lastError = "tts-http-" + code;
+                return new byte[0];
+            }
+            String backendError = c.getHeaderField("X-Init-Error");
+            lastError = backendError == null ? "" : backendError;
+            try (InputStream in = c.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
+                return out.toByteArray();
+            }
+        } catch (Exception e) {
+            lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
+            Log.w(TAG, "Fallback synthesis failed: " + e.getMessage());
+            return new byte[0];
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
     public void stopSession() {
         if (baseUrl.isEmpty()) return;
         HttpURLConnection c = null;
