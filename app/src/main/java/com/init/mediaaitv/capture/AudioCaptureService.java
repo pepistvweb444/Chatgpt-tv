@@ -25,6 +25,7 @@ import com.init.mediaaitv.MainActivity;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class AudioCaptureService extends Service {
     public static final String ACTION_STOP = "com.init.mediaaitv.STOP";
@@ -38,6 +39,7 @@ public final class AudioCaptureService extends Service {
     private ExecutorService executor;
     private volatile boolean stop;
     private volatile String lastNotice = "";
+    private final AtomicBoolean requestInFlight = new AtomicBoolean(false);
     private AudioManager audioManager;
     private AudioFocusRequest focusRequest;
 
@@ -119,7 +121,7 @@ public final class AudioCaptureService extends Service {
     }
 
     private void captureLoop(TranslationClient client) {
-        byte[] buf = new byte[48000];
+        byte[] buf = new byte[96000];
         int pos = 0;
         while (!stop && recorder != null) {
             int n = recorder.read(buf, pos, buf.length - pos, AudioRecord.READ_BLOCKING);
@@ -128,27 +130,38 @@ public final class AudioCaptureService extends Service {
             if (pos >= buf.length) {
                 byte[] chunk = Arrays.copyOf(buf, pos);
                 pos = 0;
+                if (!requestInFlight.compareAndSet(false, true)) {
+                    notice("Procesando traduccion; descartando audio atrasado para evitar cola.");
+                    continue;
+                }
+
                 executor.execute(() -> {
-                    if (!hasSignal(chunk)) {
-                        notice("Sin audio capturable. La app fuente puede bloquear la captura.");
-                        return;
-                    }
+                    try {
+                        if (!hasSignal(chunk)) {
+                            notice("Sin audio capturable. La app fuente puede bloquear la captura.");
+                            return;
+                        }
 
-                    byte[] translated = client.translatePcm(chunk);
-                    if (!client.getLastError().isEmpty()) {
-                        notice("Servidor IA no disponible: " + client.getLastError());
-                        return;
-                    }
+                        byte[] translated = client.translatePcm(chunk);
+                        if (!client.getLastError().isEmpty()) {
+                            notice("Backend IA: " + client.getLastError());
+                            return;
+                        }
 
-                    if ("pcm-loopback".equals(client.getLastMode())) {
-                        notice("Modo prueba: el servidor devuelve el audio original, sin traducir.");
-                    } else if (translated.length > 0) {
-                        notice("Traduccion IA activa - " + client.getLastMode());
-                    }
+                        if ("pcm-loopback".equals(client.getLastMode())) {
+                            notice("Modo prueba: el servidor devuelve el audio original, sin traducir.");
+                        } else if ("buffering".equals(client.getLastMode())) {
+                            notice("Acumulando voz para traducir...");
+                        } else if (translated.length > 0) {
+                            notice("Traduccion IA activa - " + client.getLastMode());
+                        }
 
-                    if (translated.length > 0 && !stop) {
-                        requestDuck();
-                        if (player != null) player.write(translated);
+                        if (translated.length > 0 && !stop) {
+                            requestDuck();
+                            if (player != null) player.write(translated);
+                        }
+                    } finally {
+                        requestInFlight.set(false);
                     }
                 });
             }
