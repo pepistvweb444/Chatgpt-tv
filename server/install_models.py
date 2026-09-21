@@ -21,19 +21,33 @@ for src in installed:
         if src.get_translation(dst) is not None:
             installed_pairs.add((src.code, dst.code))
 
-for source, target in [("en", "es"), ("es", "en")]:
+targets = ["es", "fr", "it", "de", "pt", "zh", "ja", "ko", "eu"]
+pairs = []
+for target in targets:
+    if target != "en":
+        pairs.append(("en", target))
+        pairs.append((target, "en"))
+
+for source, target in pairs:
     if (source, target) in installed_pairs:
         print(f"Argos {source}->{target}: ya instalado")
         continue
 
-    pkg = next((p for p in available if p.from_code == source and p.to_code == target), None)
+    pkg = next(
+        (p for p in available if p.from_code == source and p.to_code == target),
+        None
+    )
+
     if pkg is None:
-        print(f"Argos {source}->{target}: paquete no encontrado")
+        print(f"Argos {source}->{target}: paquete no disponible, se usara fallback si es necesario")
         continue
 
-    print(f"Descargando Argos {source}->{target}...")
-    path = pkg.download()
-    argostranslate.package.install_from_path(path)
-    print(f"Argos {source}->{target}: OK")
+    try:
+        print(f"Descargando Argos {source}->{target}...")
+        path = pkg.download()
+        argostranslate.package.install_from_path(path)
+        print(f"Argos {source}->{target}: OK")
+    except Exception as exc:
+        print(f"Argos {source}->{target}: ERROR {exc}")
 
 print("=== Modelos listos ===")
