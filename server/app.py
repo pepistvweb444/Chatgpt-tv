@@ -14,8 +14,9 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
+from speaker_diarizer import OnlineSpeakerDiarizer
 
-APP_VERSION = "1.1-auto-voice-clone"
+APP_VERSION = "1.2-multispeaker-final"
 ROOT = Path(__file__).resolve().parent
 APK_PATH = ROOT / "latest.apk"
 SESSION_ROOT = ROOT / "session-data"
@@ -29,6 +30,7 @@ OPENVOICE_URL = os.getenv("INIT_OPENVOICE_URL", "http://127.0.0.1:8000")
 VOICE_PROFILE = os.getenv("INIT_VOICE_PROFILE", "Jarvis")
 WHISPER_MODEL_NAME = os.getenv("INIT_WHISPER_MODEL", "tiny")
 TTS_SPEED = float(os.getenv("INIT_TTS_SPEED", "1.15"))
+CLONE_REFERENCE_SECONDS = float(os.getenv("INIT_CLONE_REFERENCE_SECONDS", "6.0"))
 
 app = FastAPI(title="INIT Media AI Backend", version=APP_VERSION)
 
@@ -141,25 +143,31 @@ def pcm48_to_clone_wav(pcm: bytes) -> bytes:
 
 
 def enroll_profile(profile: str, wav: bytes) -> None:
-    boundary = "----InitMediaAI" + safe_id(profile)
-    head = (
-        f"--{boundary}\r\n"
-        'Content-Disposition: form-data; name="sample"; filename="sample.wav"\r\n'
-        "Content-Type: audio/wav\r\n\r\n"
-    ).encode("utf-8")
-    tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
-    body = head + wav + tail
-
-    req = urllib.request.Request(
-        OPENVOICE_URL + "/enroll/" + urllib.parse.quote(profile, safe=""),
-        data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=180) as r:
-        if r.status != 200:
-            raise RuntimeError(f"OpenVoice enroll HTTP {r.status}")
-        r.read()
+    last_error = None
+    for field_name in ("file", "audio", "sample"):
+        boundary = "----InitMediaAI" + safe_id(profile) + field_name
+        head = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{field_name}"; filename="sample.wav"\r\n'
+            "Content-Type: audio/wav\r\n\r\n"
+        ).encode("utf-8")
+        tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
+        body = head + wav + tail
+        req = urllib.request.Request(
+            OPENVOICE_URL + "/enroll/" + urllib.parse.quote(profile, safe=""),
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                if r.status == 200:
+                    r.read()
+                    return
+                last_error = RuntimeError(f"OpenVoice enroll HTTP {r.status}")
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"OpenVoice enroll failed: {last_error}")
 
 
 def synthesize(text: str, language: str, profile: str | None = None) -> bytes:
@@ -189,18 +197,15 @@ class Session:
         self.read_offset = 0
         self.write_offset = self.input_path.stat().st_size
         self.output = collections.deque()
-        self.errors = collections.deque(maxlen=20)
+        self.errors = collections.deque(maxlen=40)
         self.lock = threading.Lock()
         self.cond = threading.Condition(self.lock)
         self.stopped = False
         self.processed = 0
         self.translated = 0
         self.last_activity = time.time()
-        self.clone_profile = "init_" + self.sid[:24]
-        self.clone_reference_bytes = int(BYTES_PER_SECOND * 10.0)
-        self.clone_ready = False
-        self.clone_enrolling = False
-        self.clone_error = ""
+        self.diarizer = OnlineSpeakerDiarizer(self.sid)
+        self.reference_target_bytes = int(BYTES_PER_SECOND * CLONE_REFERENCE_SECONDS)
         threading.Thread(target=self.worker, daemon=True).start()
 
     def window_seconds(self) -> float:
@@ -221,38 +226,7 @@ class Session:
                 f.write(pcm)
             self.write_offset += len(pcm)
             self.last_activity = time.time()
-
-            if (
-                self.voice_mode == "clone"
-                and not self.clone_ready
-                and not self.clone_enrolling
-                and self.write_offset >= self.clone_reference_bytes
-            ):
-                self.clone_enrolling = True
-                threading.Thread(target=self.enroll_clone, daemon=True).start()
-
             self.cond.notify_all()
-
-    def enroll_clone(self):
-        try:
-            with self.input_path.open("rb") as f:
-                reference = f.read(self.clone_reference_bytes)
-            if len(reference) < self.clone_reference_bytes:
-                raise RuntimeError("Not enough reference audio for clone")
-
-            wav = pcm48_to_clone_wav(reference)
-            enroll_profile(self.clone_profile, wav)
-
-            with self.cond:
-                self.clone_ready = True
-                self.clone_error = ""
-                self.cond.notify_all()
-        except Exception as e:
-            with self.cond:
-                self.clone_error = (type(e).__name__ + ":" + str(e))[:180]
-                self.errors.append(self.clone_error)
-                self.clone_enrolling = False
-                self.cond.notify_all()
 
     def queued_seconds(self) -> float:
         with self.lock:
@@ -264,25 +238,51 @@ class Session:
                 return None
             return self.output.popleft()
 
+    def _collect_reference(self, cluster, window: bytes):
+        if cluster is None or cluster.profile_ready:
+            return
+        max_bytes = int(BYTES_PER_SECOND * 12.0)
+        remaining = max(0, max_bytes - len(cluster.reference_pcm))
+        if remaining:
+            cluster.reference_pcm.extend(window[:remaining])
+        if (
+            len(cluster.reference_pcm) >= self.reference_target_bytes
+            and not cluster.enrolling
+            and not cluster.profile_ready
+        ):
+            cluster.enrolling = True
+            threading.Thread(
+                target=self._enroll_speaker,
+                args=(cluster,),
+                daemon=True,
+            ).start()
+
+    def _enroll_speaker(self, cluster):
+        try:
+            reference = bytes(cluster.reference_pcm[: self.reference_target_bytes])
+            wav = pcm48_to_clone_wav(reference)
+            enroll_profile(cluster.profile, wav)
+            with self.lock:
+                cluster.profile_ready = True
+                cluster.enrolling = False
+                cluster.enroll_error = ""
+        except Exception as exc:
+            msg = (type(exc).__name__ + ":" + str(exc))[:180]
+            with self.lock:
+                cluster.profile_ready = False
+                cluster.enrolling = False
+                cluster.enroll_error = msg
+                self.errors.append(f"speaker-{cluster.speaker_id}:{msg}")
+
     def worker(self):
         while True:
             with self.cond:
                 needed = self.window_bytes()
-
-                while (
-                    not self.stopped
-                    and self.voice_mode == "clone"
-                    and not self.clone_ready
-                ):
-                    self.cond.wait(timeout=0.5)
-
                 while not self.stopped and self.write_offset - self.read_offset < needed:
-                    self.cond.wait(timeout=0.5)
+                    self.cond.wait(timeout=0.35)
                     needed = self.window_bytes()
-
                 if self.stopped:
                     return
-
                 offset = self.read_offset
                 self.read_offset += needed
 
@@ -293,19 +293,18 @@ class Session:
             if len(window) != needed:
                 with self.lock:
                     self.read_offset -= needed
-                time.sleep(0.05)
+                time.sleep(0.03)
                 continue
 
-            item = {
-                "kind": "none",
-                "audio": b"",
-                "text": "",
-                "mode": "no-speech",
-            }
+            item = {"kind": "none", "audio": b"", "text": "", "mode": "no-speech"}
             try:
                 source_text, source_lang = transcribe(window)
                 self.processed += 1
                 if source_text:
+                    cluster = self.diarizer.assign(window)
+                    if cluster is not None and self.voice_mode == "clone":
+                        self._collect_reference(cluster, window)
+
                     translated = translate_text(source_text, source_lang, self.language)
                     self.translated += 1
 
@@ -316,26 +315,24 @@ class Session:
                             "text": translated,
                             "mode": "translated-text",
                             "source_lang": source_lang,
+                            "speaker_id": cluster.speaker_id if cluster else 0,
                         }
                     else:
-                        out = synthesize(translated, self.language, self.clone_profile)
+                        profile = cluster.profile if cluster is not None and cluster.profile_ready else VOICE_PROFILE
+                        out = synthesize(translated, self.language, profile)
                         item = {
                             "kind": "audio",
                             "audio": out,
                             "text": translated,
-                            "mode": "translated-openvoice",
+                            "mode": "translated-cloned-speaker" if cluster is not None and cluster.profile_ready else "translated-learning-speaker",
                             "source_lang": source_lang,
+                            "speaker_id": cluster.speaker_id if cluster else 0,
+                            "profile_ready": bool(cluster and cluster.profile_ready),
                         }
-            except Exception as e:
-                msg = (type(e).__name__ + ":" + str(e))[:180]
+            except Exception as exc:
+                msg = (type(exc).__name__ + ":" + str(exc))[:180]
                 self.errors.append(msg)
-                item = {
-                    "kind": "error",
-                    "audio": b"",
-                    "text": "",
-                    "mode": "error-fallback",
-                    "error": msg,
-                }
+                item = {"kind": "error", "audio": b"", "text": "", "mode": "error-fallback", "error": msg}
 
             with self.lock:
                 self.output.append(item)
@@ -376,7 +373,9 @@ def health():
         "version": APP_VERSION,
         "mode": "dual-continuous",
         "fast_mode": "device-tts",
-        "clone_mode": "openvoice:auto-enroll-10s",
+        "clone_mode": "openvoice:multi-speaker-auto-enroll",
+        "diarization": "init-mfcc-pitch-online",
+        "clone_reference_seconds": CLONE_REFERENCE_SECONDS,
         "asr": f"faster-whisper:{WHISPER_MODEL_NAME}",
         "translation": "argos-offline",
         "openvoice_ok": openvoice_ok,
@@ -507,10 +506,7 @@ def session_status(session: str):
         "processed_windows": sess.processed,
         "translated_windows": sess.translated,
         "pending_outputs": len(sess.output),
-        "clone_profile": sess.clone_profile,
-        "clone_ready": sess.clone_ready,
-        "clone_enrolling": sess.clone_enrolling,
-        "clone_error": sess.clone_error,
+        "speakers": sess.diarizer.snapshot(),
         "errors": list(sess.errors),
     }
 
