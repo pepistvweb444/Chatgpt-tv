@@ -126,8 +126,9 @@ def speaker_embedding(pcm: bytes) -> np.ndarray | None:
     mfcc = logmel @ _DCT.T
     mfcc = mfcc[:, 1:14]
 
-    # Cepstral mean normalization makes the fingerprint less sensitive to devices/rooms.
-    mfcc = mfcc - np.mean(mfcc, axis=0, keepdims=True)
+    # Keep the MFCC mean: it carries vocal-tract/timbre information that helps
+    # distinguish actors. Device/room effects are handled by final vector
+    # normalization and by the slowly-adapting online cluster centroids.
     delta = np.diff(mfcc, axis=0)
 
     freqs = np.linspace(0.0, 8000.0, power.shape[1], dtype=np.float32)
