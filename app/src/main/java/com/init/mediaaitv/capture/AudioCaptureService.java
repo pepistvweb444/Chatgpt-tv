@@ -274,7 +274,19 @@ public final class AudioCaptureService extends Service {
 
         try {
             originalMusicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
-            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0);
+            try {
+                audioManager.adjustStreamVolume(
+                        AudioManager.STREAM_MUSIC,
+                        AudioManager.ADJUST_MUTE,
+                        0
+                );
+            } catch (Throwable ignored) {
+            }
+            audioManager.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    0,
+                    AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE
+            );
             sourceMuted = true;
             notice("Audio original silenciado; doblaje IA activo.");
         } catch (Throwable t) {
@@ -286,7 +298,19 @@ public final class AudioCaptureService extends Service {
         if (!sourceMuted || audioManager == null || originalMusicVolume < 0) return;
 
         try {
-            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, originalMusicVolume, 0);
+            try {
+                audioManager.adjustStreamVolume(
+                        AudioManager.STREAM_MUSIC,
+                        AudioManager.ADJUST_UNMUTE,
+                        0
+                );
+            } catch (Throwable ignored) {
+            }
+            audioManager.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    originalMusicVolume,
+                    0
+            );
         } catch (Throwable t) {
             Log.w(TAG, "Could not restore original media volume", t);
         } finally {
