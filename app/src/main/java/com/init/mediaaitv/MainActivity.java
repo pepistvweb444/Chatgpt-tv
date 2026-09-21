@@ -104,7 +104,8 @@ public final class MainActivity extends Activity {
         });
         quality = spinner(new String[]{"Auto AI", "4K AI", "8K AI", "Original / baja latencia"});
         spatial = spinner(new String[]{"Spatial AI automatico", "Binaural auriculares", "5.1 / 7.1", "Original"});
-        voiceMode = spinner(new String[]{"Rapido continuo (voz IA local)", "Voces originales multi-hablante (recomendado)"});\n        voiceMode.setSelection(1);
+        voiceMode = spinner(new String[]{"Rapido continuo (voz IA local)", "Voces originales multi-hablante (recomendado)"});
+        voiceMode.setSelection(1);
 
         row1.addView(lang, new LinearLayout.LayoutParams(0, -2, 1));
         row1.addView(quality, new LinearLayout.LayoutParams(0, -2, 1));
