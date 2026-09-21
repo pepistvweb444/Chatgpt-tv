@@ -14,7 +14,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
-APP_VERSION = "0.9-continuous-session"
+APP_VERSION = "1.0-dual-continuous"
 ROOT = Path(__file__).resolve().parent
 APK_PATH = ROOT / "latest.apk"
 SESSION_ROOT = ROOT / "session-data"
@@ -22,8 +22,8 @@ SESSION_ROOT.mkdir(parents=True, exist_ok=True)
 
 PCM_RATE = 48000
 BYTES_PER_SECOND = PCM_RATE * 2
-WINDOW_SECONDS = float(os.getenv("INIT_WINDOW_SECONDS", "1.5"))
-WINDOW_BYTES = int(BYTES_PER_SECOND * WINDOW_SECONDS)
+FAST_WINDOW_SECONDS = float(os.getenv("INIT_FAST_WINDOW_SECONDS", "1.0"))
+CLONE_WINDOW_SECONDS = float(os.getenv("INIT_CLONE_WINDOW_SECONDS", "1.5"))
 OPENVOICE_URL = os.getenv("INIT_OPENVOICE_URL", "http://127.0.0.1:8000")
 VOICE_PROFILE = os.getenv("INIT_VOICE_PROFILE", "Jarvis")
 WHISPER_MODEL_NAME = os.getenv("INIT_WHISPER_MODEL", "tiny")
@@ -141,9 +141,10 @@ def synthesize(text: str, language: str) -> bytes:
 
 
 class Session:
-    def __init__(self, sid: str, language: str):
+    def __init__(self, sid: str, language: str, voice_mode: str):
         self.sid = safe_id(sid)
         self.language = language
+        self.voice_mode = voice_mode if voice_mode in ("fast", "clone") else "fast"
         self.input_path = SESSION_ROOT / f"{self.sid}.pcm"
         self.input_path.touch(exist_ok=True)
         self.read_offset = 0
@@ -158,9 +159,17 @@ class Session:
         self.last_activity = time.time()
         threading.Thread(target=self.worker, daemon=True).start()
 
-    def push(self, pcm: bytes, language: str):
+    def window_seconds(self) -> float:
+        return FAST_WINDOW_SECONDS if self.voice_mode == "fast" else CLONE_WINDOW_SECONDS
+
+    def window_bytes(self) -> int:
+        return int(BYTES_PER_SECOND * self.window_seconds())
+
+    def push(self, pcm: bytes, language: str, voice_mode: str):
         if language:
             self.language = language
+        if voice_mode in ("fast", "clone"):
+            self.voice_mode = voice_mode
         if not pcm:
             return
         with self.cond:
@@ -177,63 +186,88 @@ class Session:
     def pop(self):
         with self.lock:
             if not self.output:
-                return b"", {}
+                return None
             return self.output.popleft()
 
     def worker(self):
         while True:
             with self.cond:
-                while not self.stopped and self.write_offset - self.read_offset < WINDOW_BYTES:
-                    self.cond.wait(timeout=1.0)
+                needed = self.window_bytes()
+                while not self.stopped and self.write_offset - self.read_offset < needed:
+                    self.cond.wait(timeout=0.5)
+                    needed = self.window_bytes()
                 if self.stopped:
                     return
                 offset = self.read_offset
-                self.read_offset += WINDOW_BYTES
+                self.read_offset += needed
 
             with self.input_path.open("rb") as f:
                 f.seek(offset)
-                window = f.read(WINDOW_BYTES)
+                window = f.read(needed)
 
-            if len(window) != WINDOW_BYTES:
+            if len(window) != needed:
                 with self.lock:
-                    self.read_offset -= WINDOW_BYTES
-                time.sleep(0.1)
+                    self.read_offset -= needed
+                time.sleep(0.05)
                 continue
 
-            out = b""
-            meta = {"mode": "no-speech"}
+            item = {
+                "kind": "none",
+                "audio": b"",
+                "text": "",
+                "mode": "no-speech",
+            }
             try:
-                text, source_lang = transcribe(window)
+                source_text, source_lang = transcribe(window)
                 self.processed += 1
-                if text:
-                    translated = translate_text(text, source_lang, self.language)
-                    out = synthesize(translated, self.language)
+                if source_text:
+                    translated = translate_text(source_text, source_lang, self.language)
                     self.translated += 1
-                    meta = {
-                        "mode": "translated-openvoice",
-                        "source_lang": source_lang,
-                        "asr_chars": len(text),
-                        "translation_chars": len(translated),
-                    }
+
+                    if self.voice_mode == "fast":
+                        item = {
+                            "kind": "text",
+                            "audio": b"",
+                            "text": translated,
+                            "mode": "translated-text",
+                            "source_lang": source_lang,
+                        }
+                    else:
+                        out = synthesize(translated, self.language)
+                        item = {
+                            "kind": "audio",
+                            "audio": out,
+                            "text": translated,
+                            "mode": "translated-openvoice",
+                            "source_lang": source_lang,
+                        }
             except Exception as e:
                 msg = (type(e).__name__ + ":" + str(e))[:180]
                 self.errors.append(msg)
-                meta = {"mode": "error-fallback", "error": msg}
+                item = {
+                    "kind": "error",
+                    "audio": b"",
+                    "text": "",
+                    "mode": "error-fallback",
+                    "error": msg,
+                }
 
             with self.lock:
-                self.output.append((out, meta))
+                self.output.append(item)
                 self.last_activity = time.time()
 
 
-def get_session(sid: str, language: str) -> Session:
+def get_session(sid: str, language: str, voice_mode: str) -> Session:
     sid = safe_id(sid)
     with _sessions_lock:
         sess = _sessions.get(sid)
         if sess is None:
-            sess = Session(sid, language)
+            sess = Session(sid, language, voice_mode)
             _sessions[sid] = sess
         else:
             sess.language = language
+            if voice_mode in ("fast", "clone"):
+                sess.voice_mode = voice_mode
         return sess
 
 
@@ -248,16 +282,16 @@ def health():
     return {
         "ok": True,
         "version": APP_VERSION,
-        "mode": "continuous-session-queue",
+        "mode": "dual-continuous",
+        "fast_mode": "device-tts",
+        "clone_mode": f"openvoice:{VOICE_PROFILE}",
         "asr": f"faster-whisper:{WHISPER_MODEL_NAME}",
         "translation": "argos-offline",
-        "voice": f"openvoice:{VOICE_PROFILE}",
         "openvoice_ok": openvoice_ok,
-        "window_seconds": WINDOW_SECONDS,
+        "fast_window_seconds": FAST_WINDOW_SECONDS,
+        "clone_window_seconds": CLONE_WINDOW_SECONDS,
         "tts_speed": TTS_SPEED,
         "active_sessions": len(_sessions),
-        "video_ai": "remote-or-disabled",
-        "spatial_audio": "planned",
     }
 
 
@@ -265,32 +299,74 @@ def health():
 async def stream_push(request: Request):
     pcm = await request.body()
     lang = request.query_params.get("lang", "es-ES")
-    sid = request.headers.get("X-Init-Session") or (request.client.host if request.client else "default")
-    sess = get_session(sid, lang)
-    sess.push(pcm, lang)
+    voice_mode = request.query_params.get("voice_mode", "fast")
+    sid = request.headers.get("X-Init-Session") or (
+        request.client.host if request.client else "default"
+    )
+    sess = get_session(sid, lang, voice_mode)
+    sess.push(pcm, lang, voice_mode)
     return JSONResponse({
         "ok": True,
         "session": sess.sid,
+        "voice_mode": sess.voice_mode,
         "queued_seconds": round(sess.queued_seconds(), 2),
         "processed_windows": sess.processed,
         "translated_windows": sess.translated,
     })
 
 
+@app.get("/v1/stream/poll-text")
+def stream_poll_text(session: str):
+    sess = get_session(session, "es-ES", "fast")
+    item = sess.pop()
+    if item is None:
+        return {
+            "ok": True,
+            "mode": "waiting",
+            "text": "",
+            "queued_seconds": round(sess.queued_seconds(), 2),
+        }
+
+    return {
+        "ok": item.get("kind") != "error",
+        "mode": item.get("mode", "waiting"),
+        "text": item.get("text", ""),
+        "source_lang": item.get("source_lang", ""),
+        "error": item.get("error", ""),
+        "queued_seconds": round(sess.queued_seconds(), 2),
+        "processed_windows": sess.processed,
+        "translated_windows": sess.translated,
+    }
+
+
 @app.get("/v1/stream/poll")
 def stream_poll(session: str):
-    sess = get_session(session, "es-ES")
-    audio, meta = sess.pop()
-    mode = meta.get("mode", "waiting")
+    sess = get_session(session, "es-ES", "clone")
+    item = sess.pop()
+    if item is None:
+        return Response(
+            content=b"",
+            media_type="audio/L16",
+            headers={
+                "X-Init-Mode": "waiting",
+                "X-Init-Queued-Seconds": f"{sess.queued_seconds():.1f}",
+            },
+        )
+
     headers = {
-        "X-Init-Mode": mode,
+        "X-Init-Mode": item.get("mode", "waiting"),
         "X-Init-Queued-Seconds": f"{sess.queued_seconds():.1f}",
         "X-Init-Processed-Windows": str(sess.processed),
         "X-Init-Translated-Windows": str(sess.translated),
     }
-    if meta.get("error"):
-        headers["X-Init-Error"] = meta["error"]
-    return Response(content=audio, media_type="audio/L16", headers=headers)
+    if item.get("error"):
+        headers["X-Init-Error"] = item["error"]
+
+    return Response(
+        content=item.get("audio", b""),
+        media_type="audio/L16",
+        headers=headers,
+    )
 
 
 @app.get("/v1/session/status")
@@ -299,10 +375,14 @@ def session_status(session: str):
     with _sessions_lock:
         sess = _sessions.get(sid)
     if sess is None:
-        return JSONResponse(status_code=404, content={"ok": False, "error": "session-not-found"})
+        return JSONResponse(
+            status_code=404,
+            content={"ok": False, "error": "session-not-found"},
+        )
     return {
         "ok": True,
         "session": sid,
+        "voice_mode": sess.voice_mode,
         "queued_seconds": round(sess.queued_seconds(), 2),
         "processed_windows": sess.processed,
         "translated_windows": sess.translated,
@@ -323,25 +403,15 @@ def session_stop(session: str):
     return {"ok": True, "session": sid}
 
 
-@app.post("/v1/translate-pcm")
-async def translate_pcm_compat(request: Request):
-    pcm = await request.body()
-    lang = request.query_params.get("lang", "es-ES")
-    sid = request.headers.get("X-Init-Session") or (request.client.host if request.client else "default")
-    sess = get_session(sid, lang)
-    sess.push(pcm, lang)
-    audio, meta = sess.pop()
-    headers = {
-        "X-Init-Mode": meta.get("mode", "queued"),
-        "X-Init-Queued-Seconds": f"{sess.queued_seconds():.1f}",
-    }
-    if meta.get("error"):
-        headers["X-Init-Error"] = meta["error"]
-    return Response(content=audio, media_type="audio/L16", headers=headers)
-
-
 @app.get("/apk/latest")
 def latest_apk():
     if APK_PATH.exists():
-        return FileResponse(APK_PATH, media_type="application/vnd.android.package-archive", filename="INIT-Media-AI-TV-latest.apk")
-    return JSONResponse(status_code=404, content={"ok": False, "error": "latest.apk not deployed yet"})
+        return FileResponse(
+            APK_PATH,
+            media_type="application/vnd.android.package-archive",
+            filename="INIT-Media-AI-TV-latest.apk",
+        )
+    return JSONResponse(
+        status_code=404,
+        content={"ok": False, "error": "latest.apk not deployed yet"},
+    )
