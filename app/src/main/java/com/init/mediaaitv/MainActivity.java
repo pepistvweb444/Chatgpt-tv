@@ -110,10 +110,10 @@ public final class MainActivity extends Activity {
         root.addView(row1);
 
         server = new EditText(this);
-        server.setHint("Servidor IA, por ejemplo http://192.168.1.50:8765");
+        server.setHint("Servidor IA de DigitalOcean");
         server.setTextColor(Color.WHITE);
         server.setHintTextColor(Color.GRAY);
-        server.setText(load("server", "http://192.168.1.50:8765"));
+        server.setText(load("server", "http://165.22.83.150:8765"));
         server.setSingleLine(true);
         server.setTextSize(16);
         root.addView(server);
