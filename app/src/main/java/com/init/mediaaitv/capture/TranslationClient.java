@@ -14,7 +14,9 @@ public final class TranslationClient {
     private final String baseUrl;
     private final String language;
     private final String quality;
-    private final String spatial;\n    private volatile String lastMode = "unknown";\n    private volatile String lastError = "";
+    private final String spatial;
+    private volatile String lastMode = "unknown";
+    private volatile String lastError = "";
 
     public TranslationClient(String baseUrl, String language, String quality, String spatial) {
         String clean = baseUrl == null ? "" : baseUrl.trim();
@@ -26,7 +28,10 @@ public final class TranslationClient {
     }
 
     public byte[] translatePcm(byte[] pcm) {
-        if (baseUrl.isEmpty()) { lastError = "empty-server"; return new byte[0]; }
+        if (baseUrl.isEmpty()) {
+            lastError = "empty-server";
+            return new byte[0];
+        }
         HttpURLConnection c = null;
         try {
             String q = "?lang=" + URLEncoder.encode(language, "UTF-8")
@@ -39,10 +44,22 @@ public final class TranslationClient {
             c.setRequestMethod("POST");
             c.setDoOutput(true);
             c.setRequestProperty("Content-Type", "audio/L16;rate=48000;channels=1");
-            c.setRequestProperty("X-Init-AI", "tv-v0.3");
+            c.setRequestProperty("X-Init-AI", "tv-v0.6");
             c.setFixedLengthStreamingMode(pcm.length);
-            try (OutputStream out = c.getOutputStream()) { out.write(pcm); }
-            if (c.getResponseCode() != 200) { lastError = "http-" + c.getResponseCode(); return new byte[0]; }\n            lastMode = c.getHeaderField("X-Init-Mode");\n            if (lastMode == null) lastMode = "unknown";\n            lastError = "";
+            try (OutputStream out = c.getOutputStream()) {
+                out.write(pcm);
+            }
+
+            int code = c.getResponseCode();
+            if (code != 200) {
+                lastError = "http-" + code;
+                return new byte[0];
+            }
+
+            lastMode = c.getHeaderField("X-Init-Mode");
+            if (lastMode == null) lastMode = "unknown";
+            lastError = "";
+
             try (InputStream in = c.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                 byte[] buf = new byte[8192];
                 int n;
@@ -50,10 +67,19 @@ public final class TranslationClient {
                 return out.toByteArray();
             }
         } catch (Exception e) {
+            lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
             Log.w(TAG, "Translation endpoint unavailable: " + e.getMessage());
             return new byte[0];
         } finally {
             if (c != null) c.disconnect();
         }
+    }
+
+    public String getLastMode() {
+        return lastMode;
+    }
+
+    public String getLastError() {
+        return lastError;
     }
 }
