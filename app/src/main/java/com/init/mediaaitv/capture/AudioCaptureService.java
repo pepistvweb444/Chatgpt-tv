@@ -37,6 +37,7 @@ public final class AudioCaptureService extends Service {
     private PcmPlayer player;
     private ExecutorService executor;
     private volatile boolean stop;
+    private volatile String lastNotice = "";
     private AudioManager audioManager;
     private AudioFocusRequest focusRequest;
 
@@ -128,7 +129,23 @@ public final class AudioCaptureService extends Service {
                 byte[] chunk = Arrays.copyOf(buf, pos);
                 pos = 0;
                 executor.execute(() -> {
+                    if (!hasSignal(chunk)) {
+                        notice("Sin audio capturable. La app fuente puede bloquear la captura.");
+                        return;
+                    }
+
                     byte[] translated = client.translatePcm(chunk);
+                    if (!client.getLastError().isEmpty()) {
+                        notice("Servidor IA no disponible: " + client.getLastError());
+                        return;
+                    }
+
+                    if ("pcm-loopback".equals(client.getLastMode())) {
+                        notice("Modo prueba: el servidor devuelve el audio original, sin traducir.");
+                    } else if (translated.length > 0) {
+                        notice("Traduccion IA activa - " + client.getLastMode());
+                    }
+
                     if (translated.length > 0 && !stop) {
                         requestDuck();
                         if (player != null) player.write(translated);
@@ -136,6 +153,23 @@ public final class AudioCaptureService extends Service {
                 });
             }
         }
+    }
+
+    private boolean hasSignal(byte[] pcm) {
+        int peak = 0;
+        for (int i = 0; i + 1 < pcm.length; i += 2) {
+            int sample = (short)((pcm[i] & 0xff) | (pcm[i + 1] << 8));
+            int a = Math.abs(sample);
+            if (a > peak) peak = a;
+            if (peak > 300) return true;
+        }
+        return false;
+    }
+
+    private void notice(String text) {
+        if (text == null || text.equals(lastNotice)) return;
+        lastNotice = text;
+        updateNotification(text);
     }
 
     private void requestDuck() {
