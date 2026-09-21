@@ -8,15 +8,20 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.util.UUID;
 
 public final class TranslationClient {
     private static final String TAG = "InitTranslationClient";
+
     private final String baseUrl;
     private final String language;
     private final String quality;
     private final String spatial;
+    private final String sessionId;
+
     private volatile String lastMode = "unknown";
     private volatile String lastError = "";
+    private volatile String lastQueuedSeconds = "0";
 
     public TranslationClient(String baseUrl, String language, String quality, String spatial) {
         String clean = baseUrl == null ? "" : baseUrl.trim();
@@ -25,39 +30,83 @@ public final class TranslationClient {
         this.language = language;
         this.quality = quality;
         this.spatial = spatial;
+        this.sessionId = UUID.randomUUID().toString();
     }
 
-    public byte[] translatePcm(byte[] pcm) {
+    public boolean pushPcm(byte[] pcm) {
         if (baseUrl.isEmpty()) {
             lastError = "empty-server";
-            return new byte[0];
+            return false;
         }
         HttpURLConnection c = null;
         try {
             String q = "?lang=" + URLEncoder.encode(language, "UTF-8")
                     + "&quality=" + URLEncoder.encode(quality, "UTF-8")
                     + "&spatial=" + URLEncoder.encode(spatial, "UTF-8");
-            URL url = new URL(baseUrl + "/v1/translate-pcm" + q);
+            URL url = new URL(baseUrl + "/v1/stream/push" + q);
             c = (HttpURLConnection) url.openConnection();
             c.setConnectTimeout(3000);
-            c.setReadTimeout(180000);
+            c.setReadTimeout(10000);
             c.setRequestMethod("POST");
             c.setDoOutput(true);
             c.setRequestProperty("Content-Type", "audio/L16;rate=48000;channels=1");
-            c.setRequestProperty("X-Init-AI", "tv-v0.7");
+            c.setRequestProperty("X-Init-AI", "tv-v0.9");
+            c.setRequestProperty("X-Init-Session", sessionId);
             c.setFixedLengthStreamingMode(pcm.length);
+
             try (OutputStream out = c.getOutputStream()) {
                 out.write(pcm);
             }
 
             int code = c.getResponseCode();
             if (code != 200) {
-                lastError = "http-" + code;
+                lastError = "push-http-" + code;
+                return false;
+            }
+
+            lastError = "";
+            try (InputStream in = c.getInputStream()) {
+                byte[] buf = new byte[1024];
+                while (in.read(buf) >= 0) {
+                    // drain body
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
+            Log.w(TAG, "Push endpoint unavailable: " + e.getMessage());
+            return false;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    public byte[] pollPcm() {
+        if (baseUrl.isEmpty()) return new byte[0];
+
+        HttpURLConnection c = null;
+        try {
+            String q = "?session=" + URLEncoder.encode(sessionId, "UTF-8");
+            URL url = new URL(baseUrl + "/v1/stream/poll" + q);
+            c = (HttpURLConnection) url.openConnection();
+            c.setConnectTimeout(3000);
+            c.setReadTimeout(10000);
+            c.setRequestMethod("GET");
+            c.setRequestProperty("X-Init-AI", "tv-v0.9");
+            c.setRequestProperty("X-Init-Session", sessionId);
+
+            int code = c.getResponseCode();
+            if (code != 200) {
+                lastError = "poll-http-" + code;
                 return new byte[0];
             }
 
             lastMode = c.getHeaderField("X-Init-Mode");
             if (lastMode == null) lastMode = "unknown";
+
+            String queued = c.getHeaderField("X-Init-Queued-Seconds");
+            if (queued != null) lastQueuedSeconds = queued;
+
             String backendError = c.getHeaderField("X-Init-Error");
             lastError = backendError == null ? "" : backendError;
 
@@ -69,8 +118,26 @@ public final class TranslationClient {
             }
         } catch (Exception e) {
             lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
-            Log.w(TAG, "Translation endpoint unavailable: " + e.getMessage());
+            Log.w(TAG, "Poll endpoint unavailable: " + e.getMessage());
             return new byte[0];
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    public void stopSession() {
+        if (baseUrl.isEmpty()) return;
+        HttpURLConnection c = null;
+        try {
+            String q = "?session=" + URLEncoder.encode(sessionId, "UTF-8");
+            URL url = new URL(baseUrl + "/v1/session/stop" + q);
+            c = (HttpURLConnection) url.openConnection();
+            c.setConnectTimeout(2000);
+            c.setReadTimeout(3000);
+            c.setRequestMethod("POST");
+            c.setRequestProperty("X-Init-Session", sessionId);
+            c.getResponseCode();
+        } catch (Exception ignored) {
         } finally {
             if (c != null) c.disconnect();
         }
@@ -82,5 +149,9 @@ public final class TranslationClient {
 
     public String getLastError() {
         return lastError;
+    }
+
+    public String getLastQueuedSeconds() {
+        return lastQueuedSeconds;
     }
 }
