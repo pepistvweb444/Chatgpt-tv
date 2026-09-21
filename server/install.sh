@@ -21,6 +21,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip wheel
 pip install -r requirements.txt
+python install_models.py
 
 sudo tee /etc/systemd/system/init-media-ai.service >/dev/null <<'UNIT'
 [Unit]
@@ -32,7 +33,11 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/init-media-ai/server
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/init-media-ai/server/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8765 --workers 2
+Environment=INIT_WHISPER_MODEL=tiny
+Environment=INIT_OPENVOICE_URL=http://127.0.0.1:8000
+Environment=INIT_VOICE_PROFILE=Jarvis
+Environment=INIT_WINDOW_SECONDS=3.0
+ExecStart=/opt/init-media-ai/server/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8765 --workers 1
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -42,7 +47,8 @@ WantedBy=multi-user.target
 UNIT
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now init-media-ai.service
+sudo systemctl restart init-media-ai.service
+sudo systemctl enable init-media-ai.service
 
 sudo ufw allow 22/tcp || true
 sudo ufw allow ${PORT}/tcp || true
