@@ -31,6 +31,7 @@ public final class MainActivity extends Activity {
     private Spinner lang;
     private Spinner quality;
     private Spinner spatial;
+    private Spinner voiceMode;
     private Spinner apps;
     private EditText server;
     private TextView status;
@@ -103,11 +104,14 @@ public final class MainActivity extends Activity {
         });
         quality = spinner(new String[]{"Auto AI", "4K AI", "8K AI", "Original / baja latencia"});
         spatial = spinner(new String[]{"Spatial AI automatico", "Binaural auriculares", "5.1 / 7.1", "Original"});
+        voiceMode = spinner(new String[]{"Rapido continuo (minimo retraso)", "Voz clonada continua"});
 
         row1.addView(lang, new LinearLayout.LayoutParams(0, -2, 1));
         row1.addView(quality, new LinearLayout.LayoutParams(0, -2, 1));
         row1.addView(spatial, new LinearLayout.LayoutParams(0, -2, 1));
         root.addView(row1);
+        root.addView(text("Modo de voz", 18, Color.WHITE));
+        root.addView(voiceMode);
 
         server = new EditText(this);
         server.setHint("Servidor IA de DigitalOcean");
@@ -214,9 +218,10 @@ public final class MainActivity extends Activity {
         i.putExtra("quality", String.valueOf(quality.getSelectedItem()));
         i.putExtra("spatial", String.valueOf(spatial.getSelectedItem()));
         i.putExtra("server", server.getText().toString().trim());
+        i.putExtra("voiceMode", voiceMode.getSelectedItemPosition() == 1 ? "clone" : "fast");
 
         startForegroundService(i);
-        status.setText("Traduccion activa. Ahora abre una aplicacion desde la lista. "
+        status.setText((voiceMode.getSelectedItemPosition() == 1 ? "Voz clonada continua" : "Rapido continuo") + ". Ahora abre una aplicacion desde la lista. "
                 + "Si bloquea AudioPlaybackCapture, INIT no recibira su audio.");
     }
 
