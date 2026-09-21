@@ -8,10 +8,10 @@ android {
 
     defaultConfig {
         applicationId = "com.init.mediaaitv"
-        minSdk = 29
+        minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.4-cloud-test"
+        versionCode = 5
+        versionName = "0.5-compat-test"
     }
 
     buildTypes {
