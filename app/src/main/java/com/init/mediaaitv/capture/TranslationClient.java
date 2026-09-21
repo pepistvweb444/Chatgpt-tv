@@ -58,7 +58,8 @@ public final class TranslationClient {
 
             lastMode = c.getHeaderField("X-Init-Mode");
             if (lastMode == null) lastMode = "unknown";
-            lastError = "";
+            String backendError = c.getHeaderField("X-Init-Error");
+            lastError = backendError == null ? "" : backendError;
 
             try (InputStream in = c.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                 byte[] buf = new byte[8192];
