@@ -14,6 +14,9 @@ import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioPlaybackCaptureConfiguration;
 import android.media.AudioRecord;
+import android.media.MediaRecorder;
+import android.media.audiofx.AcousticEchoCanceler;
+import android.media.audiofx.NoiseSuppressor;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
@@ -38,6 +41,8 @@ public final class AudioCaptureService extends Service {
 
     private MediaProjection projection;
     private AudioRecord recorder;
+    private AcousticEchoCanceler echoCanceler;
+    private NoiseSuppressor noiseSuppressor;
     private PcmPlayer player;
     private LocalTtsPlayer localTts;
     private ExecutorService executor;
@@ -51,6 +56,7 @@ public final class AudioCaptureService extends Service {
     private AudioFocusRequest focusRequest;
     private int originalMusicVolume = -1;
     private boolean sourceMuted = false;
+    private boolean legacyMicMode = false;
     private TranslationClient client;
     private String voiceMode = "fast";
 
@@ -78,30 +84,14 @@ public final class AudioCaptureService extends Service {
         String spatial = intent.getStringExtra("spatial");
         String server = intent.getStringExtra("server");
         voiceMode = "clone".equals(intent.getStringExtra("voiceMode")) ? "clone" : "fast";
+        legacyMicMode = intent.getBooleanExtra("legacyMic", false) || Build.VERSION.SDK_INT < 29;
 
-        if (resultCode != Activity.RESULT_OK || resultData == null) {
+        if (!legacyMicMode && (resultCode != Activity.RESULT_OK || resultData == null)) {
             stopSelf();
             return START_NOT_STICKY;
         }
 
         try {
-            MediaProjectionManager pm =
-                    (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-            projection = pm.getMediaProjection(resultCode, resultData);
-            projection.registerCallback(new MediaProjection.Callback() {
-                @Override public void onStop() {
-                    shutdown();
-                    stopSelf();
-                }
-            }, new android.os.Handler(getMainLooper()));
-
-            AudioPlaybackCaptureConfiguration config =
-                    new AudioPlaybackCaptureConfiguration.Builder(projection)
-                            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                            .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                            .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                            .build();
-
             AudioFormat format = new AudioFormat.Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setSampleRate(48000)
@@ -114,11 +104,54 @@ public final class AudioCaptureService extends Service {
                     AudioFormat.ENCODING_PCM_16BIT
             );
 
-            recorder = new AudioRecord.Builder()
-                    .setAudioFormat(format)
-                    .setBufferSizeInBytes(Math.max(min * 4, 192000))
-                    .setAudioPlaybackCaptureConfig(config)
-                    .build();
+            if (legacyMicMode) {
+                recorder = new AudioRecord.Builder()
+                        .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                        .setAudioFormat(format)
+                        .setBufferSizeInBytes(Math.max(min * 4, 192000))
+                        .build();
+
+                int session = recorder.getAudioSessionId();
+                try {
+                    if (AcousticEchoCanceler.isAvailable()) {
+                        echoCanceler = AcousticEchoCanceler.create(session);
+                        if (echoCanceler != null) echoCanceler.setEnabled(true);
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "AEC unavailable", t);
+                }
+                try {
+                    if (NoiseSuppressor.isAvailable()) {
+                        noiseSuppressor = NoiseSuppressor.create(session);
+                        if (noiseSuppressor != null) noiseSuppressor.setEnabled(true);
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "Noise suppressor unavailable", t);
+                }
+            } else {
+                MediaProjectionManager pm =
+                        (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+                projection = pm.getMediaProjection(resultCode, resultData);
+                projection.registerCallback(new MediaProjection.Callback() {
+                    @Override public void onStop() {
+                        shutdown();
+                        stopSelf();
+                    }
+                }, new android.os.Handler(getMainLooper()));
+
+                AudioPlaybackCaptureConfiguration config =
+                        new AudioPlaybackCaptureConfiguration.Builder(projection)
+                                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                                .build();
+
+                recorder = new AudioRecord.Builder()
+                        .setAudioFormat(format)
+                        .setBufferSizeInBytes(Math.max(min * 4, 192000))
+                        .setAudioPlaybackCaptureConfig(config)
+                        .build();
+            }
 
             player = new PcmPlayer();
             if ("fast".equals(voiceMode)) {
@@ -139,8 +172,9 @@ public final class AudioCaptureService extends Service {
             running = true;
 
             updateNotification(
-                    ("fast".equals(voiceMode) ? "Rápido continuo" : "Voz clonada continua")
-                            + " - " + (lang == null ? "es-ES" : lang)
+                    (legacyMicMode ? "Fire OS legacy mic · " : "")
+                            + ("fast".equals(voiceMode) ? "Rápido continuo" : "Voces originales multi-hablante")
+                            + " · " + (lang == null ? "es-ES" : lang)
             );
 
             recorder.startRecording();
@@ -149,7 +183,7 @@ public final class AudioCaptureService extends Service {
             executor.execute(this::pollLoop);
 
         } catch (Throwable t) {
-            Log.e(TAG, "Cannot start playback capture", t);
+            Log.e(TAG, "Cannot start capture", t);
             shutdown();
             stopSelf();
         }
@@ -164,8 +198,8 @@ public final class AudioCaptureService extends Service {
         while (!stop && recorder != null) {
             int n = recorder.read(buf, pos, buf.length - pos, AudioRecord.READ_BLOCKING);
             if (n <= 0) continue;
-            pos += n;
 
+            pos += n;
             if (pos >= buf.length) {
                 uploadQueue.offer(Arrays.copyOf(buf, pos));
                 pos = 0;
@@ -185,7 +219,6 @@ public final class AudioCaptureService extends Service {
                     uploadQueue.offer(chunk);
                     Thread.sleep(800);
                 }
-
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -207,15 +240,14 @@ public final class AudioCaptureService extends Service {
                     String text = client.pollText();
                     if (!text.isEmpty()) {
                         enableSourceReplacement();
-
                         boolean localOk = localTts != null && localTts.speak(text);
                         if (!localOk) {
                             byte[] fallback = client.synthesizeText(text);
                             if (fallback.length > 0 && player != null) player.write(fallback);
                         }
-
                         notice(
-                                "Rápido continuo · retraso cola: "
+                                (legacyMicMode ? "Fire legacy · " : "")
+                                        + "Rápido continuo · retraso cola: "
                                         + client.getLastQueuedSeconds() + " s"
                         );
                     } else {
@@ -224,13 +256,17 @@ public final class AudioCaptureService extends Service {
                 } else {
                     byte[] translated = client.pollPcm();
 
-                    if ("translated-openvoice".equals(client.getLastMode())) {
+                    if (
+                            "translated-cloned-speaker".equals(client.getLastMode())
+                            || "translated-fallback-voice".equals(client.getLastMode())
+                    ) {
                         enableSourceReplacement();
                     }
 
                     if (translated.length > 0 && !stop) {
                         notice(
-                                "Voz clonada continua · retraso cola: "
+                                (legacyMicMode ? "Fire legacy · " : "")
+                                        + "Multi-hablante · retraso cola: "
                                         + client.getLastQueuedSeconds() + " s"
                         );
                         requestDuck();
@@ -274,23 +310,35 @@ public final class AudioCaptureService extends Service {
 
         try {
             originalMusicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
-            try {
-                audioManager.adjustStreamVolume(
+
+            if (legacyMicMode) {
+                // Fire OS 7 has no internal playback capture. The microphone needs
+                // to keep hearing the source, so only attenuate it. AEC/NS reduces
+                // the translated voice feeding back into the microphone.
+                int reduced = Math.max(1, Math.round(originalMusicVolume * 0.28f));
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, reduced, 0);
+                sourceMuted = true;
+                notice("Fire OS 7: voz original atenuada; doblaje IA prioritario.");
+            } else {
+                try {
+                    audioManager.adjustStreamVolume(
+                            AudioManager.STREAM_MUSIC,
+                            AudioManager.ADJUST_MUTE,
+                            0
+                    );
+                } catch (Throwable ignored) {
+                }
+                audioManager.setStreamVolume(
                         AudioManager.STREAM_MUSIC,
-                        AudioManager.ADJUST_MUTE,
-                        0
+                        0,
+                        AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE
                 );
-            } catch (Throwable ignored) {
+                sourceMuted = true;
+                notice("Audio original silenciado; doblaje IA activo.");
             }
-            audioManager.setStreamVolume(
-                    AudioManager.STREAM_MUSIC,
-                    0,
-                    AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE
-            );
-            sourceMuted = true;
-            notice("Audio original silenciado; doblaje IA activo.");
+
         } catch (Throwable t) {
-            Log.w(TAG, "Could not mute original media stream", t);
+            Log.w(TAG, "Could not change source media volume", t);
         }
     }
 
@@ -298,14 +346,17 @@ public final class AudioCaptureService extends Service {
         if (!sourceMuted || audioManager == null || originalMusicVolume < 0) return;
 
         try {
-            try {
-                audioManager.adjustStreamVolume(
-                        AudioManager.STREAM_MUSIC,
-                        AudioManager.ADJUST_UNMUTE,
-                        0
-                );
-            } catch (Throwable ignored) {
+            if (!legacyMicMode) {
+                try {
+                    audioManager.adjustStreamVolume(
+                            AudioManager.STREAM_MUSIC,
+                            AudioManager.ADJUST_UNMUTE,
+                            0
+                    );
+                } catch (Throwable ignored) {
+                }
             }
+
             audioManager.setStreamVolume(
                     AudioManager.STREAM_MUSIC,
                     originalMusicVolume,
@@ -350,6 +401,15 @@ public final class AudioCaptureService extends Service {
 
         try { if (client != null) client.stopSession(); } catch (Throwable ignored) {}
         try { if (recorder != null) recorder.stop(); } catch (Throwable ignored) {}
+
+        if (echoCanceler != null) {
+            try { echoCanceler.release(); } catch (Throwable ignored) {}
+            echoCanceler = null;
+        }
+        if (noiseSuppressor != null) {
+            try { noiseSuppressor.release(); } catch (Throwable ignored) {}
+            noiseSuppressor = null;
+        }
 
         if (recorder != null) recorder.release();
         recorder = null;
