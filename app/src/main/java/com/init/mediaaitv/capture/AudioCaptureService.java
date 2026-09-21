@@ -39,6 +39,7 @@ public final class AudioCaptureService extends Service {
     private MediaProjection projection;
     private AudioRecord recorder;
     private PcmPlayer player;
+    private LocalTtsPlayer localTts;
     private ExecutorService executor;
     private final BlockingQueue<byte[]> uploadQueue = new LinkedBlockingQueue<>();
 
@@ -51,6 +52,7 @@ public final class AudioCaptureService extends Service {
     private int originalMusicVolume = -1;
     private boolean sourceMuted = false;
     private TranslationClient client;
+    private String voiceMode = "fast";
 
     @Override public void onCreate() {
         super.onCreate();
@@ -75,6 +77,7 @@ public final class AudioCaptureService extends Service {
         String quality = intent.getStringExtra("quality");
         String spatial = intent.getStringExtra("spatial");
         String server = intent.getStringExtra("server");
+        voiceMode = "clone".equals(intent.getStringExtra("voiceMode")) ? "clone" : "fast";
 
         if (resultCode != Activity.RESULT_OK || resultData == null) {
             stopSelf();
@@ -118,11 +121,16 @@ public final class AudioCaptureService extends Service {
                     .build();
 
             player = new PcmPlayer();
+            if ("fast".equals(voiceMode)) {
+                localTts = new LocalTtsPlayer(this, lang == null ? "es-ES" : lang);
+            }
+
             client = new TranslationClient(
                     server,
                     lang == null ? "es-ES" : lang,
                     quality == null ? "Auto AI" : quality,
-                    spatial == null ? "Spatial AI automatic" : spatial
+                    spatial == null ? "Spatial AI automatic" : spatial,
+                    voiceMode
             );
 
             executor = Executors.newFixedThreadPool(3);
@@ -130,9 +138,12 @@ public final class AudioCaptureService extends Service {
             shuttingDown = false;
             running = true;
 
-            updateNotification("Traduccion continua ON - " + (lang == null ? "es-ES" : lang));
-            recorder.startRecording();
+            updateNotification(
+                    ("fast".equals(voiceMode) ? "Rápido continuo" : "Voz clonada continua")
+                            + " - " + (lang == null ? "es-ES" : lang)
+            );
 
+            recorder.startRecording();
             executor.execute(this::captureLoop);
             executor.execute(this::uploadLoop);
             executor.execute(this::pollLoop);
@@ -147,29 +158,17 @@ public final class AudioCaptureService extends Service {
     }
 
     private void captureLoop() {
-        // 1 second of mono PCM16 at 48 kHz.
         byte[] buf = new byte[96000];
         int pos = 0;
 
         while (!stop && recorder != null) {
-            int n = recorder.read(
-                    buf,
-                    pos,
-                    buf.length - pos,
-                    AudioRecord.READ_BLOCKING
-            );
-
+            int n = recorder.read(buf, pos, buf.length - pos, AudioRecord.READ_BLOCKING);
             if (n <= 0) continue;
-
             pos += n;
+
             if (pos >= buf.length) {
                 uploadQueue.offer(Arrays.copyOf(buf, pos));
                 pos = 0;
-
-                int pending = uploadQueue.size();
-                if (pending > 5) {
-                    notice("Subiendo audio continuo. Cola local: " + pending + " s");
-                }
             }
         }
     }
@@ -183,10 +182,10 @@ public final class AudioCaptureService extends Service {
                 boolean ok = client != null && client.pushPcm(chunk);
                 if (!ok && client != null && !client.getLastError().isEmpty()) {
                     notice("Servidor IA: " + client.getLastError());
-                    // Do not drop this movie segment because of a temporary network failure.
                     uploadQueue.offer(chunk);
-                    Thread.sleep(1000);
+                    Thread.sleep(800);
                 }
+
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -200,29 +199,49 @@ public final class AudioCaptureService extends Service {
         while (!stop) {
             try {
                 if (client == null) {
-                    Thread.sleep(250);
+                    Thread.sleep(200);
                     continue;
                 }
 
-                byte[] translated = client.pollPcm();
+                if ("fast".equals(voiceMode)) {
+                    String text = client.pollText();
+                    if (!text.isEmpty()) {
+                        enableSourceReplacement();
+
+                        boolean localOk = localTts != null && localTts.speak(text);
+                        if (!localOk) {
+                            byte[] fallback = client.synthesizeText(text);
+                            if (fallback.length > 0 && player != null) player.write(fallback);
+                        }
+
+                        notice(
+                                "Rápido continuo · retraso cola: "
+                                        + client.getLastQueuedSeconds() + " s"
+                        );
+                    } else {
+                        Thread.sleep(150);
+                    }
+                } else {
+                    byte[] translated = client.pollPcm();
+
+                    if ("translated-openvoice".equals(client.getLastMode())) {
+                        enableSourceReplacement();
+                    }
+
+                    if (translated.length > 0 && !stop) {
+                        notice(
+                                "Voz clonada continua · retraso cola: "
+                                        + client.getLastQueuedSeconds() + " s"
+                        );
+                        requestDuck();
+                        if (player != null) player.write(translated);
+                    } else {
+                        Thread.sleep(200);
+                    }
+                }
 
                 if (!client.getLastError().isEmpty()) {
                     notice("Backend IA: " + client.getLastError());
-                }
-
-                if ("translated-openvoice".equals(client.getLastMode())) {
-                    enableSourceReplacement();
-                }
-
-                if (translated.length > 0 && !stop) {
-                    notice(
-                            "Doblando pelicula completa. Retraso servidor: "
-                                    + client.getLastQueuedSeconds() + " s"
-                    );
-                    requestDuck();
-                    if (player != null) player.write(translated);
-                } else {
-                    Thread.sleep(250);
                 }
 
             } catch (InterruptedException e) {
@@ -267,11 +286,7 @@ public final class AudioCaptureService extends Service {
         if (!sourceMuted || audioManager == null || originalMusicVolume < 0) return;
 
         try {
-            audioManager.setStreamVolume(
-                    AudioManager.STREAM_MUSIC,
-                    originalMusicVolume,
-                    0
-            );
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, originalMusicVolume, 0);
         } catch (Throwable t) {
             Log.w(TAG, "Could not restore original media volume", t);
         } finally {
@@ -309,18 +324,14 @@ public final class AudioCaptureService extends Service {
         stop = true;
         running = false;
 
-        try {
-            if (client != null) client.stopSession();
-        } catch (Throwable ignored) {
-        }
-
-        try {
-            if (recorder != null) recorder.stop();
-        } catch (Throwable ignored) {
-        }
+        try { if (client != null) client.stopSession(); } catch (Throwable ignored) {}
+        try { if (recorder != null) recorder.stop(); } catch (Throwable ignored) {}
 
         if (recorder != null) recorder.release();
         recorder = null;
+
+        if (localTts != null) localTts.close();
+        localTts = null;
 
         if (player != null) player.close();
         player = null;
@@ -328,10 +339,7 @@ public final class AudioCaptureService extends Service {
         MediaProjection p = projection;
         projection = null;
         if (p != null) {
-            try {
-                p.stop();
-            } catch (Throwable ignored) {
-            }
+            try { p.stop(); } catch (Throwable ignored) {}
         }
 
         if (executor != null) executor.shutdownNow();
@@ -375,8 +383,7 @@ public final class AudioCaptureService extends Service {
     }
 
     private void updateNotification(String text) {
-        getSystemService(NotificationManager.class)
-                .notify(41, notification(text));
+        getSystemService(NotificationManager.class).notify(41, notification(text));
     }
 
     @Override public void onDestroy() {
