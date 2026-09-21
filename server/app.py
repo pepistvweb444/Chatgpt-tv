@@ -206,6 +206,7 @@ class Session:
         self.last_activity = time.time()
         self.diarizer = OnlineSpeakerDiarizer(self.sid)
         self.reference_target_bytes = int(BYTES_PER_SECOND * CLONE_REFERENCE_SECONDS)
+        self.pending_clone = collections.defaultdict(collections.deque)
         threading.Thread(target=self.worker, daemon=True).start()
 
     def window_seconds(self) -> float:
@@ -262,10 +263,27 @@ class Session:
             reference = bytes(cluster.reference_pcm[: self.reference_target_bytes])
             wav = pcm48_to_clone_wav(reference)
             enroll_profile(cluster.profile, wav)
+
             with self.lock:
                 cluster.profile_ready = True
                 cluster.enrolling = False
                 cluster.enroll_error = ""
+                pending = list(self.pending_clone.pop(cluster.speaker_id, []))
+
+            # Render all early lines with the newly enrolled correct voice.
+            for translated, source_lang in pending:
+                out = synthesize(translated, self.language, cluster.profile)
+                with self.lock:
+                    self.output.append({
+                        "kind": "audio",
+                        "audio": out,
+                        "text": translated,
+                        "mode": "translated-cloned-speaker",
+                        "source_lang": source_lang,
+                        "speaker_id": cluster.speaker_id,
+                        "profile_ready": True,
+                    })
+
         except Exception as exc:
             msg = (type(exc).__name__ + ":" + str(exc))[:180]
             with self.lock:
@@ -273,6 +291,28 @@ class Session:
                 cluster.enrolling = False
                 cluster.enroll_error = msg
                 self.errors.append(f"speaker-{cluster.speaker_id}:{msg}")
+                pending = list(self.pending_clone.pop(cluster.speaker_id, []))
+
+            # Never lose dialogue: if cloning failed, flush with the licensed fallback voice.
+            for translated, source_lang in pending:
+                try:
+                    out = synthesize(translated, self.language, VOICE_PROFILE)
+                    with self.lock:
+                        self.output.append({
+                            "kind": "audio",
+                            "audio": out,
+                            "text": translated,
+                            "mode": "translated-fallback-voice",
+                            "source_lang": source_lang,
+                            "speaker_id": cluster.speaker_id,
+                            "profile_ready": False,
+                        })
+                except Exception as fallback_exc:
+                    with self.lock:
+                        self.errors.append(
+                            f"speaker-{cluster.speaker_id}-fallback:"
+                            + (type(fallback_exc).__name__ + ":" + str(fallback_exc))[:140]
+                        )
 
     def worker(self):
         while True:
@@ -318,17 +358,42 @@ class Session:
                             "speaker_id": cluster.speaker_id if cluster else 0,
                         }
                     else:
-                        profile = cluster.profile if cluster is not None and cluster.profile_ready else VOICE_PROFILE
-                        out = synthesize(translated, self.language, profile)
-                        item = {
-                            "kind": "audio",
-                            "audio": out,
-                            "text": translated,
-                            "mode": "translated-cloned-speaker" if cluster is not None and cluster.profile_ready else "translated-learning-speaker",
-                            "source_lang": source_lang,
-                            "speaker_id": cluster.speaker_id if cluster else 0,
-                            "profile_ready": bool(cluster and cluster.profile_ready),
-                        }
+                        if cluster is None:
+                            out = synthesize(translated, self.language, VOICE_PROFILE)
+                            item = {
+                                "kind": "audio",
+                                "audio": out,
+                                "text": translated,
+                                "mode": "translated-fallback-voice",
+                                "source_lang": source_lang,
+                                "speaker_id": 0,
+                                "profile_ready": False,
+                            }
+                        elif cluster.profile_ready:
+                            out = synthesize(translated, self.language, cluster.profile)
+                            item = {
+                                "kind": "audio",
+                                "audio": out,
+                                "text": translated,
+                                "mode": "translated-cloned-speaker",
+                                "source_lang": source_lang,
+                                "speaker_id": cluster.speaker_id,
+                                "profile_ready": True,
+                            }
+                        else:
+                            with self.lock:
+                                self.pending_clone[cluster.speaker_id].append(
+                                    (translated, source_lang)
+                                )
+                            item = {
+                                "kind": "none",
+                                "audio": b"",
+                                "text": "",
+                                "mode": "learning-speaker",
+                                "source_lang": source_lang,
+                                "speaker_id": cluster.speaker_id,
+                                "profile_ready": False,
+                            }
             except Exception as exc:
                 msg = (type(exc).__name__ + ":" + str(exc))[:180]
                 self.errors.append(msg)
