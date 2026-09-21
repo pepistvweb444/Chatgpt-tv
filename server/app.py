@@ -369,6 +369,30 @@ def stream_poll(session: str):
     )
 
 
+@app.post("/v1/synthesize-text")
+async def synthesize_text_endpoint(request: Request):
+    lang = request.query_params.get("lang", "es-ES")
+    text = (await request.body()).decode("utf-8", errors="ignore").strip()
+    if not text:
+        return Response(content=b"", media_type="audio/L16")
+    try:
+        audio = synthesize(text, lang)
+        return Response(
+            content=audio,
+            media_type="audio/L16",
+            headers={"X-Init-Mode": "fallback-openvoice"},
+        )
+    except Exception as e:
+        return Response(
+            content=b"",
+            media_type="audio/L16",
+            headers={
+                "X-Init-Mode": "error-fallback",
+                "X-Init-Error": (type(e).__name__ + ":" + str(e))[:180],
+            },
+        )
+
+
 @app.get("/v1/session/status")
 def session_status(session: str):
     sid = safe_id(session)
