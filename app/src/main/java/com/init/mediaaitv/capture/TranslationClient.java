@@ -39,12 +39,12 @@ public final class TranslationClient {
                     + "&spatial=" + URLEncoder.encode(spatial, "UTF-8");
             URL url = new URL(baseUrl + "/v1/translate-pcm" + q);
             c = (HttpURLConnection) url.openConnection();
-            c.setConnectTimeout(1800);
-            c.setReadTimeout(4500);
+            c.setConnectTimeout(3000);
+            c.setReadTimeout(180000);
             c.setRequestMethod("POST");
             c.setDoOutput(true);
             c.setRequestProperty("Content-Type", "audio/L16;rate=48000;channels=1");
-            c.setRequestProperty("X-Init-AI", "tv-v0.6");
+            c.setRequestProperty("X-Init-AI", "tv-v0.7");
             c.setFixedLengthStreamingMode(pcm.length);
             try (OutputStream out = c.getOutputStream()) {
                 out.write(pcm);
