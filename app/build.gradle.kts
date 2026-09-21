@@ -10,8 +10,8 @@ android {
         applicationId = "com.init.mediaaitv"
         minSdk = 26
         targetSdk = 36
-        versionCode = 9
-        versionName = "0.9-continuous-movie-test"
+        versionCode = 10
+        versionName = "1.0-dual-continuous-test"
     }
 
     buildTypes {
