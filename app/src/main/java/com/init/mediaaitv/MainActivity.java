@@ -179,6 +179,10 @@ public final class MainActivity extends Activity {
 
     private void requestCapture() {
         save("server", server.getText().toString().trim());
+        if (Build.VERSION.SDK_INT < 29) {
+            status.setText("Esta TV puede abrir INIT, pero Android 9 o anterior no permite AudioPlaybackCapture. Usa el reproductor propio o una TV Android 10+ para traducir audio de otras apps.");
+            return;
+        }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
             return;
