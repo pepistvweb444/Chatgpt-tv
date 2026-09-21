@@ -10,8 +10,8 @@ android {
         applicationId = "com.init.mediaaitv"
         minSdk = 29
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3-test"
+        versionCode = 4
+        versionName = "0.4-cloud-test"
     }
 
     buildTypes {
