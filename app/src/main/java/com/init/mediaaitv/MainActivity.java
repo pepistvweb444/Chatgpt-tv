@@ -184,16 +184,36 @@ public final class MainActivity extends Activity {
 
     private void requestCapture() {
         save("server", server.getText().toString().trim());
-        if (Build.VERSION.SDK_INT < 29) {
-            status.setText("Esta TV puede abrir INIT, pero Android 9 o anterior no permite AudioPlaybackCapture. Usa el reproductor propio o una TV Android 10+ para traducir audio de otras apps.");
-            return;
-        }
+
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
             return;
         }
-        MediaProjectionManager pm = (MediaProjectionManager)getSystemService(MEDIA_PROJECTION_SERVICE);
+
+        if (Build.VERSION.SDK_INT < 29) {
+            startLegacyMicTranslation();
+            return;
+        }
+
+        MediaProjectionManager pm =
+                (MediaProjectionManager)getSystemService(MEDIA_PROJECTION_SERVICE);
         startActivityForResult(pm.createScreenCaptureIntent(), REQ_CAPTURE);
+    }
+
+    private void startLegacyMicTranslation() {
+        Intent i = new Intent(this, AudioCaptureService.class);
+        i.putExtra("legacyMic", true);
+        i.putExtra("lang", langCode());
+        i.putExtra("quality", String.valueOf(quality.getSelectedItem()));
+        i.putExtra("spatial", String.valueOf(spatial.getSelectedItem()));
+        i.putExtra("server", server.getText().toString().trim());
+        i.putExtra("voiceMode", voiceMode.getSelectedItemPosition() == 1 ? "clone" : "fast");
+
+        startForegroundService(i);
+        status.setText(
+                "Modo compatible Fire OS 7 / Android 9: captura por microfono con cancelacion de eco. "
+                + "La voz original se atenua, pero no puede eliminarse al 100% sin captura interna."
+        );
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
