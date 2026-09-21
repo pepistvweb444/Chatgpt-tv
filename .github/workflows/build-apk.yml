@@ -16,6 +16,29 @@ jobs:
       - name: Validate backend Python
         run: python -m py_compile server/app.py server/speaker_diarizer.py server/install_models.py
 
+      - name: Smoke-test speaker diarizer
+        run: |
+          python -m pip install --quiet numpy==2.2.6
+          PYTHONPATH=server python - <<'PY'
+          import numpy as np
+          from speaker_diarizer import speaker_embedding, OnlineSpeakerDiarizer
+
+          sr = 48000
+          t = np.arange(sr * 2, dtype=np.float32) / sr
+          x = (
+              0.45 * np.sin(2*np.pi*120*t)
+              + 0.18 * np.sin(2*np.pi*240*t)
+              + 0.08 * np.sin(2*np.pi*900*t)
+          )
+          pcm = np.clip(x * 20000, -32768, 32767).astype("<i2").tobytes()
+          emb = speaker_embedding(pcm)
+          assert emb is not None and np.isfinite(emb).all()
+          diarizer = OnlineSpeakerDiarizer("smoke")
+          cluster = diarizer.assign(pcm)
+          assert cluster is not None and cluster.speaker_id == 1
+          print("speaker diarizer smoke test: OK")
+          PY
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
