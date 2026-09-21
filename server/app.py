@@ -9,12 +9,13 @@ import tempfile
 import threading
 import time
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
-APP_VERSION = "1.0-dual-continuous"
+APP_VERSION = "1.1-auto-voice-clone"
 ROOT = Path(__file__).resolve().parent
 APK_PATH = ROOT / "latest.apk"
 SESSION_ROOT = ROOT / "session-data"
@@ -123,10 +124,48 @@ def translate_text(text: str, source: str, target: str) -> str:
     return tr.translate(text)
 
 
-def synthesize(text: str, language: str) -> bytes:
+def pcm48_to_clone_wav(pcm: bytes) -> bytes:
+    p = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-f", "s16le", "-ar", "48000", "-ac", "1", "-i", "pipe:0",
+            "-af", "highpass=f=80,lowpass=f=8000,dynaudnorm=f=150:g=15",
+            "-ar", "22050", "-ac", "1", "-f", "wav", "pipe:1",
+        ],
+        input=pcm,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    return p.stdout
+
+
+def enroll_profile(profile: str, wav: bytes) -> None:
+    boundary = "----InitMediaAI" + safe_id(profile)
+    head = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="sample"; filename="sample.wav"\r\n'
+        "Content-Type: audio/wav\r\n\r\n"
+    ).encode("utf-8")
+    tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
+    body = head + wav + tail
+
+    req = urllib.request.Request(
+        OPENVOICE_URL + "/enroll/" + urllib.parse.quote(profile, safe=""),
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=180) as r:
+        if r.status != 200:
+            raise RuntimeError(f"OpenVoice enroll HTTP {r.status}")
+        r.read()
+
+
+def synthesize(text: str, language: str, profile: str | None = None) -> bytes:
     body = json.dumps({
         "text": text,
-        "profile": VOICE_PROFILE,
+        "profile": profile or VOICE_PROFILE,
         "language": language.split("-")[0].lower(),
         "speed": TTS_SPEED,
     }).encode("utf-8")
@@ -157,6 +196,11 @@ class Session:
         self.processed = 0
         self.translated = 0
         self.last_activity = time.time()
+        self.clone_profile = "init_" + self.sid[:24]
+        self.clone_reference_bytes = int(BYTES_PER_SECOND * 10.0)
+        self.clone_ready = False
+        self.clone_enrolling = False
+        self.clone_error = ""
         threading.Thread(target=self.worker, daemon=True).start()
 
     def window_seconds(self) -> float:
@@ -177,7 +221,38 @@ class Session:
                 f.write(pcm)
             self.write_offset += len(pcm)
             self.last_activity = time.time()
+
+            if (
+                self.voice_mode == "clone"
+                and not self.clone_ready
+                and not self.clone_enrolling
+                and self.write_offset >= self.clone_reference_bytes
+            ):
+                self.clone_enrolling = True
+                threading.Thread(target=self.enroll_clone, daemon=True).start()
+
             self.cond.notify_all()
+
+    def enroll_clone(self):
+        try:
+            with self.input_path.open("rb") as f:
+                reference = f.read(self.clone_reference_bytes)
+            if len(reference) < self.clone_reference_bytes:
+                raise RuntimeError("Not enough reference audio for clone")
+
+            wav = pcm48_to_clone_wav(reference)
+            enroll_profile(self.clone_profile, wav)
+
+            with self.cond:
+                self.clone_ready = True
+                self.clone_error = ""
+                self.cond.notify_all()
+        except Exception as e:
+            with self.cond:
+                self.clone_error = (type(e).__name__ + ":" + str(e))[:180]
+                self.errors.append(self.clone_error)
+                self.clone_enrolling = False
+                self.cond.notify_all()
 
     def queued_seconds(self) -> float:
         with self.lock:
@@ -193,11 +268,21 @@ class Session:
         while True:
             with self.cond:
                 needed = self.window_bytes()
+
+                while (
+                    not self.stopped
+                    and self.voice_mode == "clone"
+                    and not self.clone_ready
+                ):
+                    self.cond.wait(timeout=0.5)
+
                 while not self.stopped and self.write_offset - self.read_offset < needed:
                     self.cond.wait(timeout=0.5)
                     needed = self.window_bytes()
+
                 if self.stopped:
                     return
+
                 offset = self.read_offset
                 self.read_offset += needed
 
@@ -233,7 +318,7 @@ class Session:
                             "source_lang": source_lang,
                         }
                     else:
-                        out = synthesize(translated, self.language)
+                        out = synthesize(translated, self.language, self.clone_profile)
                         item = {
                             "kind": "audio",
                             "audio": out,
@@ -291,7 +376,7 @@ def health():
         "version": APP_VERSION,
         "mode": "dual-continuous",
         "fast_mode": "device-tts",
-        "clone_mode": f"openvoice:{VOICE_PROFILE}",
+        "clone_mode": "openvoice:auto-enroll-10s",
         "asr": f"faster-whisper:{WHISPER_MODEL_NAME}",
         "translation": "argos-offline",
         "openvoice_ok": openvoice_ok,
@@ -422,6 +507,10 @@ def session_status(session: str):
         "processed_windows": sess.processed,
         "translated_windows": sess.translated,
         "pending_outputs": len(sess.output),
+        "clone_profile": sess.clone_profile,
+        "clone_ready": sess.clone_ready,
+        "clone_enrolling": sess.clone_enrolling,
+        "clone_error": sess.clone_error,
         "errors": list(sess.errors),
     }
 
