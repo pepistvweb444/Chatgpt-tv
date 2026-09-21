@@ -10,8 +10,8 @@ android {
         applicationId = "com.init.mediaaitv"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "1.1-auto-voice-clone-test"
+        versionCode = 12
+        versionName = "1.2-multispeaker-final-test"
     }
 
     buildTypes {
