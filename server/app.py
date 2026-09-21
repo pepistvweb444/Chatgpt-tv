@@ -23,6 +23,7 @@ WINDOW_BYTES = int(PCM_RATE * PCM_CHANNELS * PCM_BYTES_PER_SAMPLE * WINDOW_SECON
 OPENVOICE_URL = os.getenv("INIT_OPENVOICE_URL", "http://127.0.0.1:8000")
 VOICE_PROFILE = os.getenv("INIT_VOICE_PROFILE", "Jarvis")
 WHISPER_MODEL_NAME = os.getenv("INIT_WHISPER_MODEL", "tiny")
+TTS_SPEED = float(os.getenv("INIT_TTS_SPEED", "1.15"))
 
 app = FastAPI(title="INIT Media AI Backend", version=APP_VERSION)
 
@@ -120,7 +121,7 @@ def synthesize(text: str, language: str) -> bytes:
             "text": text,
             "profile": VOICE_PROFILE,
             "language": language,
-            "speed": 1.0,
+            "speed": TTS_SPEED,
         }
     ).encode("utf-8")
     req = urllib.request.Request(
@@ -151,6 +152,7 @@ def health():
         "voice": f"openvoice:{VOICE_PROFILE}",
         "openvoice_ok": openvoice_ok,
         "window_seconds": WINDOW_SECONDS,
+        "tts_speed": TTS_SPEED,
         "video_ai": "remote-or-disabled",
         "spatial_audio": "planned",
     }
