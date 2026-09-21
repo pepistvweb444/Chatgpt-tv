@@ -36,7 +36,8 @@ Environment=PYTHONUNBUFFERED=1
 Environment=INIT_WHISPER_MODEL=tiny
 Environment=INIT_OPENVOICE_URL=http://127.0.0.1:8000
 Environment=INIT_VOICE_PROFILE=Jarvis
-Environment=INIT_WINDOW_SECONDS=3.0
+Environment=INIT_WINDOW_SECONDS=1.5
+Environment=INIT_TTS_SPEED=1.15
 ExecStart=/opt/init-media-ai/server/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8765 --workers 1
 Restart=always
 RestartSec=3
