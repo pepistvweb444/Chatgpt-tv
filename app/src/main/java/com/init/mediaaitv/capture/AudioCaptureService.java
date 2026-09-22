@@ -59,6 +59,9 @@ public final class AudioCaptureService extends Service {
     private boolean legacyMicMode = false;
     private TranslationClient client;
     private String voiceMode = "fast";
+    private long captureStartedAtMs = 0L;
+    private long lastLegacyNoSignalNoticeMs = 0L;
+    private boolean legacySignalConfirmed = false;
 
     @Override public void onCreate() {
         super.onCreate();
@@ -106,28 +109,14 @@ public final class AudioCaptureService extends Service {
 
             if (legacyMicMode) {
                 recorder = new AudioRecord.Builder()
-                        .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                        .setAudioSource(MediaRecorder.AudioSource.MIC)
                         .setAudioFormat(format)
                         .setBufferSizeInBytes(Math.max(min * 4, 192000))
                         .build();
 
-                int session = recorder.getAudioSessionId();
-                try {
-                    if (AcousticEchoCanceler.isAvailable()) {
-                        echoCanceler = AcousticEchoCanceler.create(session);
-                        if (echoCanceler != null) echoCanceler.setEnabled(true);
-                    }
-                } catch (Throwable t) {
-                    Log.w(TAG, "AEC unavailable", t);
-                }
-                try {
-                    if (NoiseSuppressor.isAvailable()) {
-                        noiseSuppressor = NoiseSuppressor.create(session);
-                        if (noiseSuppressor != null) noiseSuppressor.setEnabled(true);
-                    }
-                } catch (Throwable t) {
-                    Log.w(TAG, "Noise suppressor unavailable", t);
-                }
+                // Fire OS 7 / Android 9 cannot use AudioPlaybackCapture. In this fallback
+                // we intentionally leave AEC/NS OFF: the TV loudspeaker is the source we
+                // need to transcribe, so echo cancellation can erase the program audio.
             } else {
                 MediaProjectionManager pm =
                         (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
@@ -178,6 +167,12 @@ public final class AudioCaptureService extends Service {
             );
 
             recorder.startRecording();
+            captureStartedAtMs = System.currentTimeMillis();
+            legacySignalConfirmed = false;
+            lastLegacyNoSignalNoticeMs = 0L;
+            if (recorder.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                throw new IllegalStateException("AudioRecord did not enter RECORDSTATE_RECORDING");
+            }
             executor.execute(this::captureLoop);
             executor.execute(this::uploadLoop);
             executor.execute(this::pollLoop);
@@ -201,9 +196,36 @@ public final class AudioCaptureService extends Service {
 
             pos += n;
             if (pos >= buf.length) {
+                if (legacyMicMode) updateLegacySignalDiagnostic(buf, pos);
                 uploadQueue.offer(Arrays.copyOf(buf, pos));
                 pos = 0;
             }
+        }
+    }
+
+    private void updateLegacySignalDiagnostic(byte[] pcm, int length) {
+        int peak = 0;
+        int usable = Math.min(length, pcm.length) & ~1;
+        for (int i = 0; i < usable; i += 2) {
+            int sample = (short)((pcm[i] & 0xff) | (pcm[i + 1] << 8));
+            int abs = Math.abs(sample);
+            if (abs > peak) peak = abs;
+        }
+
+        long now = System.currentTimeMillis();
+        if (peak >= 700) {
+            if (!legacySignalConfirmed) {
+                legacySignalConfirmed = true;
+                notice("Fire OS 7: microfono activo y audio detectado.");
+            }
+            return;
+        }
+
+        if (!legacySignalConfirmed
+                && now - captureStartedAtMs >= 5000L
+                && now - lastLegacyNoSignalNoticeMs >= 5000L) {
+            lastLegacyNoSignalNoticeMs = now;
+            notice("Fire OS 7: microfono abierto pero sin audio util. Sube el volumen de la TV o revisa la entrada de microfono.");
         }
     }
 
@@ -315,7 +337,9 @@ public final class AudioCaptureService extends Service {
                 // Fire OS 7 has no internal playback capture. The microphone needs
                 // to keep hearing the source, so only attenuate it. AEC/NS reduces
                 // the translated voice feeding back into the microphone.
-                int reduced = Math.max(1, Math.round(originalMusicVolume * 0.28f));
+                // Keep enough source level for the microphone fallback to continue hearing
+                // subsequent dialogue. Too much ducking starves ASR after the first line.
+                int reduced = Math.max(1, Math.round(originalMusicVolume * 0.60f));
                 audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, reduced, 0);
                 sourceMuted = true;
                 notice("Fire OS 7: voz original atenuada; doblaje IA prioritario.");
