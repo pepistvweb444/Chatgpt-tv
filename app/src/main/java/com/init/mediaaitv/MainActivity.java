@@ -40,6 +40,13 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
         buildUi();
+        if (Build.VERSION.SDK_INT < 29) {
+            status.setText(
+                    "Fire OS 7 / Android 9 detectado. Es correcto que la app solo pida permiso de microfono: "
+                    + "Accesibilidad es opcional y solo sirve para el atajo del mando. "
+                    + "En este dispositivo la traduccion usa el microfono para escuchar los altavoces de la TV."
+            );
+        }
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 902);
         }
