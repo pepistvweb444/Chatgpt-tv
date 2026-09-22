@@ -15,8 +15,8 @@ android {
         applicationId = "com.init.mediaaitv"
         minSdk = 26
         targetSdk = 36
-        versionCode = 12
-        versionName = "1.2-multispeaker"
+        versionCode = 13
+        versionName = "1.3-firetv-fix"
     }
 
     signingConfigs {
