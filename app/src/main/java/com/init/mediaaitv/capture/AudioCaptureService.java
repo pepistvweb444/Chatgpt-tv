@@ -35,6 +35,7 @@ import java.util.concurrent.TimeUnit;
 public final class AudioCaptureService extends Service {
     public static final String ACTION_STOP = "com.init.mediaaitv.STOP";
     public static volatile boolean running = false;
+    public static volatile String lastStatus = "Traduccion detenida.";
 
     private static final String TAG = "InitCapture";
     private static final String CHANNEL = "init_translate";
@@ -62,6 +63,7 @@ public final class AudioCaptureService extends Service {
     private long captureStartedAtMs = 0L;
     private long lastLegacyNoSignalNoticeMs = 0L;
     private boolean legacySignalConfirmed = false;
+    private boolean backendConfirmed = false;
 
     @Override public void onCreate() {
         super.onCreate();
@@ -73,6 +75,7 @@ public final class AudioCaptureService extends Service {
         if (intent == null) return START_NOT_STICKY;
 
         if (ACTION_STOP.equals(intent.getAction())) {
+            lastStatus = "Traduccion detenida por el usuario.";
             shutdown();
             stopSelf();
             return START_NOT_STICKY;
@@ -160,15 +163,16 @@ public final class AudioCaptureService extends Service {
             shuttingDown = false;
             running = true;
 
-            updateNotification(
+            notice(
                     (legacyMicMode ? "Fire OS legacy mic · " : "")
-                            + ("fast".equals(voiceMode) ? "Rápido continuo" : "Voces originales multi-hablante")
-                            + " · " + (lang == null ? "es-ES" : lang)
+                            + ("fast".equals(voiceMode) ? "Rapido continuo" : "Voces originales multi-hablante")
+                            + " · destino " + (lang == null ? "es-ES" : lang)
             );
 
             recorder.startRecording();
             captureStartedAtMs = System.currentTimeMillis();
             legacySignalConfirmed = false;
+            backendConfirmed = false;
             lastLegacyNoSignalNoticeMs = 0L;
             if (recorder.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
                 throw new IllegalStateException("AudioRecord did not enter RECORDSTATE_RECORDING");
@@ -179,6 +183,8 @@ public final class AudioCaptureService extends Service {
 
         } catch (Throwable t) {
             Log.e(TAG, "Cannot start capture", t);
+            lastStatus = "No se pudo iniciar captura: " + t.getClass().getSimpleName() + ": " + String.valueOf(t.getMessage());
+            updateNotification(lastStatus);
             shutdown();
             stopSelf();
         }
@@ -236,6 +242,10 @@ public final class AudioCaptureService extends Service {
                 if (chunk == null) continue;
 
                 boolean ok = client != null && client.pushPcm(chunk);
+                if (ok && !backendConfirmed) {
+                    backendConfirmed = true;
+                    notice("Backend conectado: audio recibido. Detectando idioma...");
+                }
                 if (!ok && client != null && !client.getLastError().isEmpty()) {
                     notice("Servidor IA: " + client.getLastError());
                     uploadQueue.offer(chunk);
@@ -260,6 +270,12 @@ public final class AudioCaptureService extends Service {
 
                 if ("fast".equals(voiceMode)) {
                     String text = client.pollText();
+                    if ("same-language-skip".equals(client.getLastMode())) {
+                        notice("Idioma detectado: " + client.getLastSourceLanguage()
+                                + " · coincide con el destino. No se dobla.");
+                        Thread.sleep(150);
+                        continue;
+                    }
                     if (!text.isEmpty()) {
                         enableSourceReplacement();
                         boolean localOk = localTts != null && localTts.speak(text);
@@ -277,6 +293,13 @@ public final class AudioCaptureService extends Service {
                     }
                 } else {
                     byte[] translated = client.pollPcm();
+
+                    if ("same-language-skip".equals(client.getLastMode())) {
+                        notice("Idioma detectado: " + client.getLastSourceLanguage()
+                                + " · coincide con el destino. No se dobla.");
+                        Thread.sleep(150);
+                        continue;
+                    }
 
                     if (
                             "translated-cloned-speaker".equals(client.getLastMode())
@@ -320,6 +343,7 @@ public final class AudioCaptureService extends Service {
     private void notice(String text) {
         if (text == null || text.equals(lastNotice)) return;
         lastNotice = text;
+        lastStatus = text;
         updateNotification(text);
     }
 
