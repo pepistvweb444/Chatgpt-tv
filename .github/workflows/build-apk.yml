@@ -53,11 +53,17 @@ jobs:
         with:
           gradle-version: '9.5.0'
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Build TV and Remote APKs
+        run: gradle :app:assembleDebug :remoteapp:assembleDebug --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
-          name: INIT-Media-AI-TV-v1.6-firetv-adb-overlay
+          name: INIT-Media-AI-TV-v1.7-standalone-remote
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: INIT-Remote-v1.0
+          path: remoteapp/build/outputs/apk/debug/remoteapp-debug.apk
           if-no-files-found: error
