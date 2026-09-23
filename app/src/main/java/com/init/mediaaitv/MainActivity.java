@@ -51,7 +51,8 @@ public final class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT < 29) {
             status.setText(
                     "Fire OS 7 detectado. El permiso de microfono es correcto. "
-                    + "Fire TV oculta el permiso para dibujar sobre otras apps; INIT comprobara la autorizacion especial de la barra."
+                    + "La traduccion autonoma no necesita barra flotante: usa 'Traducir y abrir aplicacion'. "
+                    + "La barra queda como funcion opcional."
             );
         }
         if (Build.VERSION.SDK_INT >= 33) {
@@ -67,7 +68,10 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
-        ensureFloatingOverlay();
+        // Overlay is optional on Fire OS 7. Standalone translation must not depend on it.
+        if (Build.VERSION.SDK_INT >= 29 || Settings.canDrawOverlays(this)) {
+            ensureFloatingOverlay();
+        }
         if (AudioCaptureService.running) status.setText(AudioCaptureService.lastStatus);
     }
 
