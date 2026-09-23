@@ -64,6 +64,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: INIT-Remote-v1.0
+          name: INIT-Remote-v1.1
           path: remoteapp/build/outputs/apk/debug/remoteapp-debug.apk
           if-no-files-found: error
