@@ -78,7 +78,7 @@ public final class MainActivity extends Activity {
         root.addView(label("INIT REMOTE", 30, Color.rgb(215,255,79)));
         root.addView(label("Control remoto para INIT Media AI TV", 17, Color.WHITE));
 
-        ip = field("IP del Fire TV, por ejemplo 192.168.1.50");
+        ip = field("IP o dirección del Fire TV, p. ej. 192.168.1.50 o 192.168.1.50:8766");
         pin = field("PIN de 6 dígitos que aparece en INIT TV");
         pin.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         root.addView(ip);
@@ -219,11 +219,19 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        state.setText("Consultando...");
+        final String base;
+        try {
+            base = normalizeBaseUrl(host);
+        } catch (IllegalArgumentException e) {
+            state.setText("Dirección del Fire TV no válida.");
+            return;
+        }
+
+        state.setText("Consultando " + base + "...");
         io.execute(() -> {
             try {
                 JSONObject obj = getJson(
-                        "http://" + host + ":" + PORT + "/status?pin=" + enc(p),
+                        base + "/status?pin=" + enc(p),
                         1200,
                         1800
                 );
@@ -241,12 +249,20 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        final String base;
+        try {
+            base = normalizeBaseUrl(host);
+        } catch (IllegalArgumentException e) {
+            state.setText("Dirección del Fire TV no válida.");
+            return;
+        }
+
         state.setText(pending);
         io.execute(() -> {
             HttpURLConnection c = null;
             try {
                 c = (HttpURLConnection) new java.net.URL(
-                        "http://" + host + ":" + PORT + path
+                        base + path
                 ).openConnection();
                 c.setConnectTimeout(1500);
                 c.setReadTimeout(2500);
@@ -288,6 +304,53 @@ public final class MainActivity extends Activity {
         detected.setText(src.isEmpty()
                 ? "Origen: Auto → " + target
                 : "Origen: " + src + " → " + target);
+    }
+
+    private String normalizeBaseUrl(String raw) {
+        String value = raw == null ? "" : raw.trim();
+        if (value.isEmpty()) throw new IllegalArgumentException("empty");
+
+        while (value.endsWith("/")) value = value.substring(0, value.length() - 1);
+
+        if (value.startsWith("http://")) {
+            value = value.substring("http://".length());
+        } else if (value.startsWith("https://")) {
+            value = value.substring("https://".length());
+        }
+
+        // The remote receiver is plain HTTP on the local network.
+        // Accept IP, host:port, or a pasted URL without duplicating :8766.
+        String host = value;
+        String port = String.valueOf(PORT);
+
+        int slash = host.indexOf('/');
+        if (slash >= 0) host = host.substring(0, slash);
+
+        if (host.startsWith("[") && host.contains("]")) {
+            int close = host.indexOf(']');
+            String ipv6 = host.substring(0, close + 1);
+            String rest = host.substring(close + 1);
+            if (rest.startsWith(":") && rest.length() > 1) port = rest.substring(1);
+            host = ipv6;
+        } else {
+            int firstColon = host.indexOf(':');
+            int lastColon = host.lastIndexOf(':');
+            if (firstColon > 0 && firstColon == lastColon) {
+                String possiblePort = host.substring(lastColon + 1);
+                if (!possiblePort.isEmpty()) {
+                    for (int i = 0; i < possiblePort.length(); i++) {
+                        if (!Character.isDigit(possiblePort.charAt(i))) {
+                            throw new IllegalArgumentException("bad-port");
+                        }
+                    }
+                    port = possiblePort;
+                    host = host.substring(0, lastColon);
+                }
+            }
+        }
+
+        if (host.isEmpty()) throw new IllegalArgumentException("bad-host");
+        return "http://" + host + ":" + port;
     }
 
     private JSONObject getJson(String url, int connectTimeout, int readTimeout) throws Exception {
