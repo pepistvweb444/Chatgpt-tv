@@ -23,6 +23,7 @@ import com.init.mediaaitv.capture.AudioCaptureService;
 import com.init.mediaaitv.launcher.TvApps;
 import com.init.mediaaitv.overlay.TranslationOverlayService;
 import com.init.mediaaitv.remote.RemoteShortcutService;
+import com.init.mediaaitv.remote.RemoteControlService;
 import com.init.mediaaitv.ui.DeviceCapabilities;
 
 import java.util.List;
@@ -40,10 +41,13 @@ public final class MainActivity extends Activity {
     private TextView status;
     private List<TvApps.Item> appItems;
     private boolean overlayPermissionFlowStarted = false;
+    private boolean pendingOpenAfterStart = false;
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
         buildUi();
+        Intent remoteService = new Intent(this, RemoteControlService.class);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(remoteService); else startService(remoteService);
         if (Build.VERSION.SDK_INT < 29) {
             status.setText(
                     "Fire OS 7 detectado. El permiso de microfono es correcto. "
@@ -104,6 +108,13 @@ public final class MainActivity extends Activity {
         root.addView(text("INIT MEDIA AI TV", 30, Color.rgb(215, 255, 79)));
         root.addView(text("Traduccion de voz + mejora audiovisual adaptativa", 18, Color.WHITE));
         root.addView(text(DeviceCapabilities.summary(this), 14, Color.LTGRAY));
+        root.addView(text(
+                "Mando INIT · TV " + RemoteControlService.localIpv4()
+                        + ":" + RemoteControlService.PORT
+                        + " · PIN " + RemoteControlService.currentPin(this),
+                16,
+                Color.rgb(215, 255, 79)
+        ));
 
         LinearLayout row1 = new LinearLayout(this);
         row1.setOrientation(LinearLayout.HORIZONTAL);
@@ -165,7 +176,9 @@ public final class MainActivity extends Activity {
         root.addView(apps);
 
         Button open = button("Abrir aplicacion seleccionada");
+        Button translateAndOpen = button("Traducir y abrir aplicacion");
         root.addView(open);
+        root.addView(translateAndOpen);
 
         status = text(
                 "Listo. La captura solo funciona con aplicaciones que Android permita capturar. "
@@ -198,17 +211,43 @@ public final class MainActivity extends Activity {
             ensureFloatingOverlay();
         });
         fireGrant.setOnClickListener(v -> showFireTvOverlayActivation());
-        open.setOnClickListener(v -> {
-            if (!appItems.isEmpty()) {
-                TvApps.Item it = appItems.get(apps.getSelectedItemPosition());
-                boolean ok = TvApps.launch(this, it.pkg);
-                status.setText(ok
-                        ? "Abriendo " + it.label + ". INIT seguira activo si esa app permite captura de audio."
-                        : "No se pudo abrir la app.");
-            }
-        });
+        open.setOnClickListener(v -> openSelectedApp());
+        translateAndOpen.setOnClickListener(v -> startTranslationAndOpenSelectedApp());
 
         setContentView(sv);
+    }
+
+    private void startTranslationAndOpenSelectedApp() {
+        pendingOpenAfterStart = true;
+        save("server", server.getText().toString().trim());
+        save("targetLang", langCode());
+        save("voiceMode", voiceMode.getSelectedItemPosition() == 1 ? "clone" : "fast");
+
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+            return;
+        }
+
+        if (Build.VERSION.SDK_INT < 29) {
+            startLegacyMicTranslation();
+            new android.os.Handler(getMainLooper()).postDelayed(this::openSelectedApp, 650);
+            pendingOpenAfterStart = false;
+            return;
+        }
+
+        requestCapture();
+    }
+
+    private void openSelectedApp() {
+        if (appItems == null || appItems.isEmpty()) {
+            status.setText("No hay una aplicacion seleccionada.");
+            return;
+        }
+        TvApps.Item it = appItems.get(apps.getSelectedItemPosition());
+        boolean ok = TvApps.launch(this, it.pkg);
+        status.setText(ok
+                ? "INIT sigue traduciendo en segundo plano. Abriendo " + it.label + "."
+                : "No se pudo abrir la aplicacion seleccionada.");
     }
 
     private void requestCapture() {
@@ -252,7 +291,8 @@ public final class MainActivity extends Activity {
         if (requestCode == REQ_AUDIO
                 && grantResults.length > 0
                 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            requestCapture();
+            if (pendingOpenAfterStart) startTranslationAndOpenSelectedApp();
+            else requestCapture();
         }
     }
 
@@ -273,8 +313,11 @@ public final class MainActivity extends Activity {
         i.putExtra("voiceMode", voiceMode.getSelectedItemPosition() == 1 ? "clone" : "fast");
 
         startForegroundService(i);
-        status.setText((voiceMode.getSelectedItemPosition() == 1 ? "Clonado multi-hablante continuo" : "Rapido continuo") + ". Ahora abre una aplicacion desde la lista. "
-                + "Si bloquea AudioPlaybackCapture, INIT no recibira su audio.");
+        status.setText((voiceMode.getSelectedItemPosition() == 1 ? "Clonado multi-hablante continuo" : "Rapido continuo") + ". Captura autorizada.");
+        if (pendingOpenAfterStart) {
+            pendingOpenAfterStart = false;
+            new android.os.Handler(getMainLooper()).postDelayed(this::openSelectedApp, 650);
+        }
     }
 
     private void ensureFloatingOverlay() {
