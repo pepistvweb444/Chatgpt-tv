@@ -344,8 +344,8 @@ class Session:
                     source_base = (source_lang or "").split("-")[0].lower()
                     target_base = (self.language or "").split("-")[0].lower()
 
-                    # Do not dub content that is already in the requested language.
-                    # Whisper detects the source language for every processed window.
+                    # Whisper detects the spoken language. If it already matches the
+                    # selected target language, keep the original audio and do not dub it.
                     if source_base and target_base and source_base == target_base:
                         item = {
                             "kind": "none",
@@ -363,7 +363,7 @@ class Session:
                         translated = translate_text(source_text, source_lang, self.language)
                         self.translated += 1
 
-                            if self.voice_mode == "fast":
+                        if self.voice_mode == "fast":
                             item = {
                                 "kind": "text",
                                 "audio": b"",
@@ -409,10 +409,16 @@ class Session:
                                     "speaker_id": cluster.speaker_id,
                                     "profile_ready": False,
                                 }
-                except Exception as exc:
+            except Exception as exc:
                 msg = (type(exc).__name__ + ":" + str(exc))[:180]
                 self.errors.append(msg)
-                item = {"kind": "error", "audio": b"", "text": "", "mode": "error-fallback", "error": msg}
+                item = {
+                    "kind": "error",
+                    "audio": b"",
+                    "text": "",
+                    "mode": "error-fallback",
+                    "error": msg,
+                }
 
             with self.lock:
                 self.output.append(item)
