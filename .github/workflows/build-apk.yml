@@ -58,6 +58,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: INIT-Media-AI-TV-v1.4-floating-overlay
+          name: INIT-Media-AI-TV-v1.5-firetv-accessibility-overlay
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
