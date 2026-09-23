@@ -15,8 +15,8 @@ android {
         applicationId = "com.init.mediaaitv"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "1.6-firetv-adb-overlay"
+        versionCode = 17
+        versionName = "1.7-standalone-remote"
     }
 
     signingConfigs {
