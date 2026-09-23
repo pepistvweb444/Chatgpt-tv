@@ -2,6 +2,7 @@ package com.init.mediaaitv;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -22,6 +23,7 @@ import android.widget.TextView;
 import com.init.mediaaitv.capture.AudioCaptureService;
 import com.init.mediaaitv.launcher.TvApps;
 import com.init.mediaaitv.overlay.TranslationOverlayService;
+import com.init.mediaaitv.remote.RemoteShortcutService;
 import com.init.mediaaitv.ui.DeviceCapabilities;
 
 import java.util.List;
@@ -147,7 +149,7 @@ public final class MainActivity extends Activity {
         actions.setOrientation(LinearLayout.HORIZONTAL);
         Button start = button("Iniciar traduccion");
         Button stop = button("Parar");
-        Button access = button("Activar boton del mando");
+        Button access = button("Barra Fire TV / mando");
         Button floating = button("Barra flotante");
         actions.addView(start, new LinearLayout.LayoutParams(0, -2, 1));
         actions.addView(stop, new LinearLayout.LayoutParams(0, -2, 1));
@@ -189,7 +191,7 @@ public final class MainActivity extends Activity {
         });
         access.setOnClickListener(v -> {
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-            status.setText("Activa INIT Media AI TV en Accesibilidad para usar CC/rojo como acceso rapido.");
+            status.setText("Activa INIT Media AI TV en Accesibilidad. En Fire TV este permiso crea la barra flotante y habilita el atajo del mando.");
         });
         floating.setOnClickListener(v -> {
             overlayPermissionFlowStarted = false;
@@ -275,6 +277,29 @@ public final class MainActivity extends Activity {
     }
 
     private void ensureFloatingOverlay() {
+        // Fire OS 7 is Android 9/API 28. Amazon does not reliably expose the
+        // normal SYSTEM_ALERT_WINDOW grant UI, so use an Accessibility overlay.
+        if (Build.VERSION.SDK_INT < 29) {
+            if (!isAccessibilityOverlayEnabled()) {
+                if (overlayPermissionFlowStarted) return;
+                overlayPermissionFlowStarted = true;
+                status.setText(
+                        "Para mostrar la barra sobre el video en Fire TV, activa INIT Media AI TV en Accesibilidad."
+                );
+                try {
+                    startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                } catch (Throwable t) {
+                    status.setText("No se pudo abrir Accesibilidad: " + t.getClass().getSimpleName());
+                }
+                return;
+            }
+
+            overlayPermissionFlowStarted = false;
+            sendBroadcast(new Intent(RemoteShortcutService.ACTION_SHOW_OVERLAY));
+            status.setText("Barra flotante Fire TV activa mediante Accesibilidad.");
+            return;
+        }
+
         if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
             if (overlayPermissionFlowStarted) return;
             overlayPermissionFlowStarted = true;
@@ -286,11 +311,10 @@ public final class MainActivity extends Activity {
                 );
                 startActivity(i);
             } catch (Throwable first) {
+                status.setText("No se pudo abrir el permiso de superposicion. Activa INIT en Accesibilidad como alternativa.");
                 try {
-                    startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION));
-                } catch (Throwable second) {
-                    status.setText("Fire TV no abrio el permiso de superposicion. Usa el boton del mando/Accesibilidad como alternativa.");
-                }
+                    startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                } catch (Throwable ignored) {}
             }
             return;
         }
@@ -299,6 +323,23 @@ public final class MainActivity extends Activity {
         Intent i = new Intent(this, TranslationOverlayService.class)
                 .setAction(TranslationOverlayService.ACTION_SHOW);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+    }
+
+    private boolean isAccessibilityOverlayEnabled() {
+        String enabled = Settings.Secure.getString(
+                getContentResolver(),
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        );
+        if (enabled == null || enabled.trim().isEmpty()) return false;
+
+        ComponentName expected = new ComponentName(this, RemoteShortcutService.class);
+        String flat = expected.flattenToString();
+        String shortFlat = expected.flattenToShortString();
+        String[] parts = enabled.split(":");
+        for (String part : parts) {
+            if (flat.equalsIgnoreCase(part) || shortFlat.equalsIgnoreCase(part)) return true;
+        }
+        return false;
     }
 
     private int indexForLang(String code) {
