@@ -275,8 +275,9 @@ public final class AudioCaptureService extends Service {
                         lastDetectedSourceLanguage = client.getLastSourceLanguage();
                     }
                     if ("same-language-skip".equals(client.getLastMode())) {
+                        restoreSourceAudio();
                         notice("Idioma detectado: " + client.getLastSourceLanguage()
-                                + " · coincide con el destino. No se dobla.");
+                                + " · coincide con el destino. Audio original activo, sin doblaje.");
                         Thread.sleep(150);
                         continue;
                     }
@@ -302,8 +303,9 @@ public final class AudioCaptureService extends Service {
                     }
 
                     if ("same-language-skip".equals(client.getLastMode())) {
+                        restoreSourceAudio();
                         notice("Idioma detectado: " + client.getLastSourceLanguage()
-                                + " · coincide con el destino. No se dobla.");
+                                + " · coincide con el destino. Audio original activo, sin doblaje.");
                         Thread.sleep(150);
                         continue;
                     }
