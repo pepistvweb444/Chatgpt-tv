@@ -65,6 +65,7 @@ public final class AudioCaptureService extends Service {
     private long lastLegacyNoSignalNoticeMs = 0L;
     private boolean legacySignalConfirmed = false;
     private boolean backendConfirmed = false;
+    private String legacyAudioSourceLabel = "MIC";
 
     @Override public void onCreate() {
         super.onCreate();
@@ -112,15 +113,11 @@ public final class AudioCaptureService extends Service {
             );
 
             if (legacyMicMode) {
-                recorder = new AudioRecord.Builder()
-                        .setAudioSource(MediaRecorder.AudioSource.MIC)
-                        .setAudioFormat(format)
-                        .setBufferSizeInBytes(Math.max(min * 4, 192000))
-                        .build();
+                recorder = createLegacyRecorder(format, min);
 
-                // Fire OS 7 / Android 9 cannot use AudioPlaybackCapture. In this fallback
-                // we intentionally leave AEC/NS OFF: the TV loudspeaker is the source we
-                // need to transcribe, so echo cancellation can erase the program audio.
+                // Fire OS 7 / Android 9 cannot use AudioPlaybackCapture. We prefer
+                // UNPROCESSED input so the Fire TV echo canceller is less likely to erase
+                // the programme audio. If unsupported, we fall back to MIC.
             } else {
                 MediaProjectionManager pm =
                         (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
@@ -165,7 +162,7 @@ public final class AudioCaptureService extends Service {
             running = true;
 
             notice(
-                    (legacyMicMode ? "Fire OS legacy mic · " : "")
+                    (legacyMicMode ? "Fire OS · " + legacyAudioSourceLabel + " · " : "")
                             + ("fast".equals(voiceMode) ? "Rapido continuo" : "Voces originales multi-hablante")
                             + " · destino " + (lang == null ? "es-ES" : lang)
             );
@@ -191,6 +188,35 @@ public final class AudioCaptureService extends Service {
         }
 
         return START_STICKY;
+    }
+
+    private AudioRecord createLegacyRecorder(AudioFormat format, int min) {
+        int buffer = Math.max(min * 4, 192000);
+
+        if (Build.VERSION.SDK_INT >= 24) {
+            try {
+                AudioRecord r = new AudioRecord.Builder()
+                        .setAudioSource(MediaRecorder.AudioSource.UNPROCESSED)
+                        .setAudioFormat(format)
+                        .setBufferSizeInBytes(buffer)
+                        .build();
+                if (r.getState() == AudioRecord.STATE_INITIALIZED) {
+                    legacyAudioSourceLabel = "UNPROCESSED";
+                    return r;
+                }
+                try { r.release(); } catch (Throwable ignored) {}
+            } catch (Throwable t) {
+                Log.w(TAG, "UNPROCESSED source unavailable", t);
+            }
+        }
+
+        AudioRecord r = new AudioRecord.Builder()
+                .setAudioSource(MediaRecorder.AudioSource.MIC)
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(buffer)
+                .build();
+        legacyAudioSourceLabel = "MIC";
+        return r;
     }
 
     private void captureLoop() {
