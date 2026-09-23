@@ -14,3 +14,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "InitMediaAITV"
 include(":app")
+include(":remoteapp")
