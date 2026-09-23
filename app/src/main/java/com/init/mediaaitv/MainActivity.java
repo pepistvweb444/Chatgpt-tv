@@ -2,7 +2,6 @@ package com.init.mediaaitv;
 
 import android.Manifest;
 import android.app.Activity;
-import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -47,9 +46,8 @@ public final class MainActivity extends Activity {
         buildUi();
         if (Build.VERSION.SDK_INT < 29) {
             status.setText(
-                    "Fire OS 7 / Android 9 detectado. Es correcto que la app solo pida permiso de microfono: "
-                    + "Accesibilidad es opcional y solo sirve para el atajo del mando. "
-                    + "En este dispositivo la traduccion usa el microfono para escuchar los altavoces de la TV."
+                    "Fire OS 7 detectado. El permiso de microfono es correcto. "
+                    + "Fire TV oculta el permiso para dibujar sobre otras apps; INIT comprobara la autorizacion especial de la barra."
             );
         }
         if (Build.VERSION.SDK_INT >= 33) {
@@ -149,12 +147,14 @@ public final class MainActivity extends Activity {
         actions.setOrientation(LinearLayout.HORIZONTAL);
         Button start = button("Iniciar traduccion");
         Button stop = button("Parar");
-        Button access = button("Barra Fire TV / mando");
+        Button access = button("Acceso rapido mando");
         Button floating = button("Barra flotante");
+        Button fireGrant = button("Activar barra Fire TV");
         actions.addView(start, new LinearLayout.LayoutParams(0, -2, 1));
         actions.addView(stop, new LinearLayout.LayoutParams(0, -2, 1));
         actions.addView(access, new LinearLayout.LayoutParams(0, -2, 1));
         actions.addView(floating, new LinearLayout.LayoutParams(0, -2, 1));
+        actions.addView(fireGrant, new LinearLayout.LayoutParams(0, -2, 1));
         root.addView(actions);
 
         root.addView(text("Aplicaciones instaladas", 20, Color.WHITE));
@@ -191,12 +191,13 @@ public final class MainActivity extends Activity {
         });
         access.setOnClickListener(v -> {
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-            status.setText("Activa INIT Media AI TV en Accesibilidad. En Fire TV este permiso crea la barra flotante y habilita el atajo del mando.");
+            status.setText("En Fire TV esta pantalla puede no mostrar servicios de terceros. La barra flotante no depende ya de este menu.");
         });
         floating.setOnClickListener(v -> {
             overlayPermissionFlowStarted = false;
             ensureFloatingOverlay();
         });
+        fireGrant.setOnClickListener(v -> showFireTvOverlayActivation());
         open.setOnClickListener(v -> {
             if (!appItems.isEmpty()) {
                 TvApps.Item it = appItems.get(apps.getSelectedItemPosition());
@@ -277,26 +278,16 @@ public final class MainActivity extends Activity {
     }
 
     private void ensureFloatingOverlay() {
-        // Fire OS 7 is Android 9/API 28. Amazon does not reliably expose the
-        // normal SYSTEM_ALERT_WINDOW grant UI, so use an Accessibility overlay.
         if (Build.VERSION.SDK_INT < 29) {
-            if (!isAccessibilityOverlayEnabled()) {
-                if (overlayPermissionFlowStarted) return;
-                overlayPermissionFlowStarted = true;
-                status.setText(
-                        "Para mostrar la barra sobre el video en Fire TV, activa INIT Media AI TV en Accesibilidad."
-                );
-                try {
-                    startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-                } catch (Throwable t) {
-                    status.setText("No se pudo abrir Accesibilidad: " + t.getClass().getSimpleName());
-                }
+            if (!Settings.canDrawOverlays(this)) {
+                showFireTvOverlayActivation();
                 return;
             }
 
-            overlayPermissionFlowStarted = false;
-            sendBroadcast(new Intent(RemoteShortcutService.ACTION_SHOW_OVERLAY));
-            status.setText("Barra flotante Fire TV activa mediante Accesibilidad.");
+            status.setText("Permiso de barra Fire TV: OK. Abriendo controles flotantes...");
+            Intent i = new Intent(this, TranslationOverlayService.class)
+                    .setAction(TranslationOverlayService.ACTION_SHOW);
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
             return;
         }
 
@@ -311,10 +302,7 @@ public final class MainActivity extends Activity {
                 );
                 startActivity(i);
             } catch (Throwable first) {
-                status.setText("No se pudo abrir el permiso de superposicion. Activa INIT en Accesibilidad como alternativa.");
-                try {
-                    startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-                } catch (Throwable ignored) {}
+                status.setText("No se pudo abrir el permiso de superposicion.");
             }
             return;
         }
@@ -325,21 +313,29 @@ public final class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
     }
 
-    private boolean isAccessibilityOverlayEnabled() {
-        String enabled = Settings.Secure.getString(
-                getContentResolver(),
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        );
-        if (enabled == null || enabled.trim().isEmpty()) return false;
-
-        ComponentName expected = new ComponentName(this, RemoteShortcutService.class);
-        String flat = expected.flattenToString();
-        String shortFlat = expected.flattenToShortString();
-        String[] parts = enabled.split(":");
-        for (String part : parts) {
-            if (flat.equalsIgnoreCase(part) || shortFlat.equalsIgnoreCase(part)) return true;
+    private void showFireTvOverlayActivation() {
+        if (Build.VERSION.SDK_INT >= 29) {
+            ensureFloatingOverlay();
+            return;
         }
-        return false;
+
+        if (Settings.canDrawOverlays(this)) {
+            status.setText("Barra Fire TV autorizada. Abriendo...");
+            Intent i = new Intent(this, TranslationOverlayService.class)
+                    .setAction(TranslationOverlayService.ACTION_SHOW);
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+            return;
+        }
+
+        status.setText(
+                "Fire TV no ofrece este permiso en sus menus. Activacion unica por ADB:\n"
+                + "1) Activa Opciones para desarrolladores > Depuracion ADB.\n"
+                + "2) Desde un movil/PC conectado a la misma red: adb connect IP_DEL_FIRE_TV:5555\n"
+                + "3) Acepta la conexion en la TV.\n"
+                + "4) Ejecuta: adb shell appops set com.init.mediaaitv SYSTEM_ALERT_WINDOW allow\n"
+                + "5) Vuelve a INIT y pulsa Barra flotante.\n"
+                + "El permiso queda guardado hasta que Fire OS lo revoque o se reinstale la app."
+        );
     }
 
     private int indexForLang(String code) {
