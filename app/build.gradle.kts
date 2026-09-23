@@ -15,8 +15,8 @@ android {
         applicationId = "com.init.mediaaitv"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.4-floating-overlay"
+        versionCode = 15
+        versionName = "1.5-firetv-accessibility-overlay"
     }
 
     signingConfigs {
