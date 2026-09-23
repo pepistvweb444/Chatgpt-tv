@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.net.Uri;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -20,6 +21,7 @@ import android.widget.TextView;
 
 import com.init.mediaaitv.capture.AudioCaptureService;
 import com.init.mediaaitv.launcher.TvApps;
+import com.init.mediaaitv.overlay.TranslationOverlayService;
 import com.init.mediaaitv.ui.DeviceCapabilities;
 
 import java.util.List;
@@ -36,6 +38,7 @@ public final class MainActivity extends Activity {
     private EditText server;
     private TextView status;
     private List<TvApps.Item> appItems;
+    private boolean overlayPermissionFlowStarted = false;
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
@@ -52,7 +55,16 @@ public final class MainActivity extends Activity {
         }
         if (getIntent().getBooleanExtra("shortcutStart", false)) {
             status.setText("Pulsa Iniciar traduccion para renovar el permiso de captura de Android.");
+            if (getIntent().getBooleanExtra("overlayRequestedStart", false) && Build.VERSION.SDK_INT >= 29) {
+                requestCapture();
+            }
         }
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        ensureFloatingOverlay();
+        if (AudioCaptureService.running) status.setText(AudioCaptureService.lastStatus);
     }
 
     private TextView text(String s, int size, int color) {
@@ -112,7 +124,8 @@ public final class MainActivity extends Activity {
         quality = spinner(new String[]{"Auto AI", "4K AI", "8K AI", "Original / baja latencia"});
         spatial = spinner(new String[]{"Spatial AI automatico", "Binaural auriculares", "5.1 / 7.1", "Original"});
         voiceMode = spinner(new String[]{"Rapido continuo (voz IA local)", "Voces originales multi-hablante (recomendado)"});
-        voiceMode.setSelection(1);
+        voiceMode.setSelection("fast".equals(load("voiceMode", "clone")) ? 0 : 1);
+        lang.setSelection(indexForLang(load("targetLang", "es-ES")));
 
         row1.addView(lang, new LinearLayout.LayoutParams(0, -2, 1));
         row1.addView(quality, new LinearLayout.LayoutParams(0, -2, 1));
@@ -135,9 +148,11 @@ public final class MainActivity extends Activity {
         Button start = button("Iniciar traduccion");
         Button stop = button("Parar");
         Button access = button("Activar boton del mando");
+        Button floating = button("Barra flotante");
         actions.addView(start, new LinearLayout.LayoutParams(0, -2, 1));
         actions.addView(stop, new LinearLayout.LayoutParams(0, -2, 1));
         actions.addView(access, new LinearLayout.LayoutParams(0, -2, 1));
+        actions.addView(floating, new LinearLayout.LayoutParams(0, -2, 1));
         root.addView(actions);
 
         root.addView(text("Aplicaciones instaladas", 20, Color.WHITE));
@@ -176,6 +191,10 @@ public final class MainActivity extends Activity {
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
             status.setText("Activa INIT Media AI TV en Accesibilidad para usar CC/rojo como acceso rapido.");
         });
+        floating.setOnClickListener(v -> {
+            overlayPermissionFlowStarted = false;
+            ensureFloatingOverlay();
+        });
         open.setOnClickListener(v -> {
             if (!appItems.isEmpty()) {
                 TvApps.Item it = appItems.get(apps.getSelectedItemPosition());
@@ -191,6 +210,8 @@ public final class MainActivity extends Activity {
 
     private void requestCapture() {
         save("server", server.getText().toString().trim());
+        save("targetLang", langCode());
+        save("voiceMode", voiceMode.getSelectedItemPosition() == 1 ? "clone" : "fast");
 
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
@@ -218,8 +239,8 @@ public final class MainActivity extends Activity {
 
         startForegroundService(i);
         status.setText(
-                "Modo compatible Fire OS 7 / Android 9: captura por microfono con cancelacion de eco. "
-                + "La voz original se atenua, pero no puede eliminarse al 100% sin captura interna."
+                "Fire OS 7: traduccion iniciada por microfono. La app detectara automaticamente el idioma hablado "
+                + "y no doblara si ya coincide con el idioma destino."
         );
     }
 
@@ -251,6 +272,39 @@ public final class MainActivity extends Activity {
         startForegroundService(i);
         status.setText((voiceMode.getSelectedItemPosition() == 1 ? "Clonado multi-hablante continuo" : "Rapido continuo") + ". Ahora abre una aplicacion desde la lista. "
                 + "Si bloquea AudioPlaybackCapture, INIT no recibira su audio.");
+    }
+
+    private void ensureFloatingOverlay() {
+        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
+            if (overlayPermissionFlowStarted) return;
+            overlayPermissionFlowStarted = true;
+            status.setText("INIT necesita permiso para mostrar la barra flotante sobre el video.");
+            try {
+                Intent i = new Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:" + getPackageName())
+                );
+                startActivity(i);
+            } catch (Throwable first) {
+                try {
+                    startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION));
+                } catch (Throwable second) {
+                    status.setText("Fire TV no abrio el permiso de superposicion. Usa el boton del mando/Accesibilidad como alternativa.");
+                }
+            }
+            return;
+        }
+
+        overlayPermissionFlowStarted = false;
+        Intent i = new Intent(this, TranslationOverlayService.class)
+                .setAction(TranslationOverlayService.ACTION_SHOW);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+    }
+
+    private int indexForLang(String code) {
+        String[] codes = {"es-ES", "en-US", "fr-FR", "it-IT", "de-DE", "pt-PT", "zh-CN", "ja-JP", "ko-KR", "eu-ES"};
+        for (int i = 0; i < codes.length; i++) if (codes[i].equals(code)) return i;
+        return 0;
     }
 
     private String langCode() {
