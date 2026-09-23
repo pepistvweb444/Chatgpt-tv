@@ -66,7 +66,12 @@ public final class RemoteShortcutService extends AccessibilityService {
                 }
             }
         };
-        registerReceiver(receiver, new IntentFilter(ACTION_SHOW_OVERLAY));
+        IntentFilter overlayFilter = new IntentFilter(ACTION_SHOW_OVERLAY);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(receiver, overlayFilter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(receiver, overlayFilter);
+        }
 
         showExpanded();
         handler.removeCallbacks(refresh);
