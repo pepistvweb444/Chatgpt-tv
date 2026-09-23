@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from speaker_diarizer import OnlineSpeakerDiarizer
 
-APP_VERSION = "1.2-multispeaker-final"
+APP_VERSION = "1.4-firetv-language-detect"
 ROOT = Path(__file__).resolve().parent
 APK_PATH = ROOT / "latest.apk"
 SESSION_ROOT = ROOT / "session-data"
@@ -539,6 +539,7 @@ def stream_poll(session: str):
         "X-Init-Queued-Seconds": f"{sess.queued_seconds():.1f}",
         "X-Init-Processed-Windows": str(sess.processed),
         "X-Init-Translated-Windows": str(sess.translated),
+        "X-Init-Source-Language": item.get("source_lang", ""),
     }
     if item.get("error"):
         headers["X-Init-Error"] = item["error"]
