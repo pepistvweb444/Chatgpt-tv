@@ -341,60 +341,75 @@ class Session:
                 source_text, source_lang = transcribe(window)
                 self.processed += 1
                 if source_text:
-                    cluster = self.diarizer.assign(window)
-                    if cluster is not None and self.voice_mode == "clone":
-                        self._collect_reference(cluster, window)
+                    source_base = (source_lang or "").split("-")[0].lower()
+                    target_base = (self.language or "").split("-")[0].lower()
 
-                    translated = translate_text(source_text, source_lang, self.language)
-                    self.translated += 1
-
-                    if self.voice_mode == "fast":
+                    # Do not dub content that is already in the requested language.
+                    # Whisper detects the source language for every processed window.
+                    if source_base and target_base and source_base == target_base:
                         item = {
-                            "kind": "text",
+                            "kind": "none",
                             "audio": b"",
-                            "text": translated,
-                            "mode": "translated-text",
+                            "text": "",
+                            "mode": "same-language-skip",
                             "source_lang": source_lang,
-                            "speaker_id": cluster.speaker_id if cluster else 0,
+                            "speaker_id": 0,
                         }
                     else:
-                        if cluster is None:
-                            out = synthesize(translated, self.language, VOICE_PROFILE)
+                        cluster = self.diarizer.assign(window)
+                        if cluster is not None and self.voice_mode == "clone":
+                            self._collect_reference(cluster, window)
+
+                        translated = translate_text(source_text, source_lang, self.language)
+                        self.translated += 1
+
+                            if self.voice_mode == "fast":
                             item = {
-                                "kind": "audio",
-                                "audio": out,
+                                "kind": "text",
+                                "audio": b"",
                                 "text": translated,
-                                "mode": "translated-fallback-voice",
+                                "mode": "translated-text",
                                 "source_lang": source_lang,
-                                "speaker_id": 0,
-                                "profile_ready": False,
-                            }
-                        elif cluster.profile_ready:
-                            out = synthesize(translated, self.language, cluster.profile)
-                            item = {
-                                "kind": "audio",
-                                "audio": out,
-                                "text": translated,
-                                "mode": "translated-cloned-speaker",
-                                "source_lang": source_lang,
-                                "speaker_id": cluster.speaker_id,
-                                "profile_ready": True,
+                                "speaker_id": cluster.speaker_id if cluster else 0,
                             }
                         else:
-                            with self.lock:
-                                self.pending_clone[cluster.speaker_id].append(
-                                    (translated, source_lang)
-                                )
-                            item = {
-                                "kind": "none",
-                                "audio": b"",
-                                "text": "",
-                                "mode": "learning-speaker",
-                                "source_lang": source_lang,
-                                "speaker_id": cluster.speaker_id,
-                                "profile_ready": False,
-                            }
-            except Exception as exc:
+                            if cluster is None:
+                                out = synthesize(translated, self.language, VOICE_PROFILE)
+                                item = {
+                                    "kind": "audio",
+                                    "audio": out,
+                                    "text": translated,
+                                    "mode": "translated-fallback-voice",
+                                    "source_lang": source_lang,
+                                    "speaker_id": 0,
+                                    "profile_ready": False,
+                                }
+                            elif cluster.profile_ready:
+                                out = synthesize(translated, self.language, cluster.profile)
+                                item = {
+                                    "kind": "audio",
+                                    "audio": out,
+                                    "text": translated,
+                                    "mode": "translated-cloned-speaker",
+                                    "source_lang": source_lang,
+                                    "speaker_id": cluster.speaker_id,
+                                    "profile_ready": True,
+                                }
+                            else:
+                                with self.lock:
+                                    self.pending_clone[cluster.speaker_id].append(
+                                        (translated, source_lang)
+                                    )
+                                item = {
+                                    "kind": "none",
+                                    "audio": b"",
+                                    "text": "",
+                                    "mode": "learning-speaker",
+                                    "source_lang": source_lang,
+                                    "speaker_id": cluster.speaker_id,
+                                    "profile_ready": False,
+                                }
+                except Exception as exc:
                 msg = (type(exc).__name__ + ":" + str(exc))[:180]
                 self.errors.append(msg)
                 item = {"kind": "error", "audio": b"", "text": "", "mode": "error-fallback", "error": msg}
