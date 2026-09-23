@@ -26,6 +26,7 @@ public final class TranslationClient {
     private volatile String lastMode = "unknown";
     private volatile String lastError = "";
     private volatile String lastQueuedSeconds = "0";
+    private volatile String lastSourceLanguage = "";
 
     public TranslationClient(
             String baseUrl,
@@ -127,6 +128,7 @@ public final class TranslationClient {
             JSONObject obj = new JSONObject(body);
             lastMode = obj.optString("mode", "unknown");
             lastQueuedSeconds = String.valueOf(obj.optDouble("queued_seconds", 0));
+            lastSourceLanguage = obj.optString("source_lang", "");
             lastError = obj.optString("error", "");
             return obj.optString("text", "");
 
@@ -165,6 +167,9 @@ public final class TranslationClient {
 
             String queued = c.getHeaderField("X-Init-Queued-Seconds");
             if (queued != null) lastQueuedSeconds = queued;
+
+            String sourceLang = c.getHeaderField("X-Init-Source-Language");
+            lastSourceLanguage = sourceLang == null ? "" : sourceLang;
 
             String backendError = c.getHeaderField("X-Init-Error");
             lastError = backendError == null ? "" : backendError;
@@ -255,6 +260,10 @@ public final class TranslationClient {
 
     public String getLastQueuedSeconds() {
         return lastQueuedSeconds;
+    }
+
+    public String getLastSourceLanguage() {
+        return lastSourceLanguage;
     }
 
     public String getVoiceMode() {
