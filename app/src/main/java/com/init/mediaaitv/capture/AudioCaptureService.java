@@ -36,6 +36,7 @@ public final class AudioCaptureService extends Service {
     public static final String ACTION_STOP = "com.init.mediaaitv.STOP";
     public static volatile boolean running = false;
     public static volatile String lastStatus = "Traduccion detenida.";
+    public static volatile String lastDetectedSourceLanguage = "";
 
     private static final String TAG = "InitCapture";
     private static final String CHANNEL = "init_translate";
@@ -270,6 +271,9 @@ public final class AudioCaptureService extends Service {
 
                 if ("fast".equals(voiceMode)) {
                     String text = client.pollText();
+                    if (!client.getLastSourceLanguage().isEmpty()) {
+                        lastDetectedSourceLanguage = client.getLastSourceLanguage();
+                    }
                     if ("same-language-skip".equals(client.getLastMode())) {
                         notice("Idioma detectado: " + client.getLastSourceLanguage()
                                 + " · coincide con el destino. No se dobla.");
@@ -293,6 +297,9 @@ public final class AudioCaptureService extends Service {
                     }
                 } else {
                     byte[] translated = client.pollPcm();
+                    if (!client.getLastSourceLanguage().isEmpty()) {
+                        lastDetectedSourceLanguage = client.getLastSourceLanguage();
+                    }
 
                     if ("same-language-skip".equals(client.getLastMode())) {
                         notice("Idioma detectado: " + client.getLastSourceLanguage()
@@ -446,6 +453,7 @@ public final class AudioCaptureService extends Service {
 
         stop = true;
         running = false;
+        lastDetectedSourceLanguage = "";
 
         try { if (client != null) client.stopSession(); } catch (Throwable ignored) {}
         try { if (recorder != null) recorder.stop(); } catch (Throwable ignored) {}
